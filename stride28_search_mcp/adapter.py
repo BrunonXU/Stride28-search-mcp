@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from playwright.async_api import async_playwright, BrowserContext, Page
+from playwright_stealth import stealth_async
 
 from stride28_search_mcp.models import SearchResultItem, SearchData
 
@@ -21,7 +22,6 @@ logger = logging.getLogger(__name__)
 # 浏览器数据存放在用户目录下，避免依赖项目路径
 _DATA_HOME = Path.home() / ".stride28-search-mcp"
 _BROWSER_DATA = _DATA_HOME / "browser_data" / "xhs"
-_STEALTH_JS = Path(__file__).resolve().parent / "stealth.min.js"
 _XHS_INDEX = "https://www.xiaohongshu.com/explore"
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -71,10 +71,9 @@ class XhsBrowserSearcher:
             viewport={"width": 1920, "height": 1080},
             user_agent=_UA,
         )
-        if _STEALTH_JS.exists():
-            await self._context.add_init_script(path=str(_STEALTH_JS))
 
         self._page = await self._context.new_page()
+        await stealth_async(self._page)
         self._initialized = True
         logger.info("MCP: 小红书浏览器就绪")
 
@@ -175,10 +174,9 @@ class XhsBrowserSearcher:
             viewport={"width": 1920, "height": 1080},
             user_agent=_UA,
         )
-        if _STEALTH_JS.exists():
-            await self._context.add_init_script(path=str(_STEALTH_JS))
 
         self._page = await self._context.new_page()
+        await stealth_async(self._page)
         await self._page.goto(_XHS_INDEX, wait_until="domcontentloaded", timeout=30000)
 
         logged_in = False

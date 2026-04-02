@@ -15,6 +15,7 @@ from typing import Dict, List, Optional
 from urllib.parse import quote
 
 from playwright.async_api import async_playwright, BrowserContext, Page, Response
+from playwright_stealth import stealth_async
 
 from stride28_search_mcp.models import SearchResultItem, SearchData
 
@@ -22,7 +23,6 @@ logger = logging.getLogger(__name__)
 
 _DATA_HOME = Path.home() / ".stride28-search-mcp"
 _BROWSER_DATA = _DATA_HOME / "browser_data" / "zhihu"
-_STEALTH_JS = Path(__file__).resolve().parent / "stealth.min.js"
 _ZHIHU_URL = "https://www.zhihu.com"
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -64,9 +64,8 @@ class ZhihuBrowserSearcher:
             viewport={"width": 1920, "height": 1080},
             user_agent=_UA,
         )
-        if _STEALTH_JS.exists():
-            await self._context.add_init_script(path=str(_STEALTH_JS))
         self._page = await self._context.new_page()
+        await stealth_async(self._page)
         self._initialized = True
         logger.info("MCP: 知乎浏览器就绪")
 
@@ -223,9 +222,8 @@ class ZhihuBrowserSearcher:
             viewport={"width": 1920, "height": 1080},
             user_agent=_UA,
         )
-        if _STEALTH_JS.exists():
-            await self._context.add_init_script(path=str(_STEALTH_JS))
         self._page = await self._context.new_page()
+        await stealth_async(self._page)
         await self._page.goto(f"{_ZHIHU_URL}/signin", wait_until="domcontentloaded", timeout=30000)
 
         logged_in = False
