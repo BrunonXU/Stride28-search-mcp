@@ -1,6 +1,6 @@
 """MCP 小红书搜索适配器 —— 纯浏览器方案
 
-使用 Playwright 浏览器内操作，不调 API，不需要签名。
+使用 Playwright Chromium 浏览器内操作，不调 API，不需要签名。
 搜索通过导航到搜索页 + 提取 __INITIAL_STATE__ 实现。
 """
 from __future__ import annotations
@@ -8,19 +8,18 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import urllib.parse
 from pathlib import Path
 from typing import List, Optional
 
 from playwright.async_api import async_playwright, BrowserContext, Page
-from playwright_stealth import stealth_async
 
 from stride28_search_mcp.models import SearchResultItem, SearchData
 
 logger = logging.getLogger(__name__)
 
-# 浏览器数据存放在用户目录下，避免依赖项目路径
-_DATA_HOME = Path.home() / ".stride28-search-mcp"
+_DATA_HOME = Path(os.getenv("STRIDE28_SEARCH_MCP_HOME", Path.home() / ".stride28-search-mcp"))
 _BROWSER_DATA = _DATA_HOME / "browser_data" / "xhs"
 _XHS_INDEX = "https://www.xiaohongshu.com/explore"
 _UA = (
@@ -41,12 +40,19 @@ class BrowserCrashError(Exception):
         super().__init__(f"浏览器异常: {detail}")
 
 
-# ============================================================
-# XhsBrowserSearcher：纯浏览器搜索器
-# ============================================================
+class BrowserLaunchError(Exception):
+    def __init__(self, detail: str = ""):
+        super().__init__(f"浏览器启动失败: {detail}")
+
+
+class CaptchaDetectedError(Exception):
+    """验证码拦截异常 (R10)"""
+    def __init__(self, detail: str = ""):
+        super().__init__(f"验证码拦截: {detail}")
+
 
 class XhsBrowserSearcher:
-    """纯浏览器小红书搜索器"""
+    """纯浏览器小红书搜索器（使用 Chromium）"""
 
     def __init__(self):
         self._pw_cm = None
@@ -55,53 +61,117 @@ class XhsBrowserSearcher:
         self._page: Optional[Page] = None
         self._initialized = False
 
+    async def _launch_context(self, headless: bool = True) -> BrowserContext:
+        """启动 Chromium persistent context"""
+        try:
+            _BROWSER_DATA.mkdir(parents=True, exist_ok=True)
+            self._pw_cm = async_playwright()
+            self._playwright = await self._pw_cm.start()
+            return await self._playwright.chromium.launch_persistent_context(
+                user_data_dir=str(_BROWSER_DATA),
+                headless=headless,
+                viewport={"width": 1920, "height": 1080},
+                user_agent=_UA,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                ],
+                ignore_default_args=["--enable-automation"],
+            )
+        except Exception as exc:
+            raise BrowserLaunchError(str(exc)) from exc
+
     async def init_browser(self, headless: bool = True):
-        """启动 Playwright persistent context"""
         if self._initialized:
             return
-
         logger.info("MCP: 初始化小红书浏览器 (headless=%s)...", headless)
-        _BROWSER_DATA.mkdir(parents=True, exist_ok=True)
-        self._pw_cm = async_playwright()
-        self._playwright = await self._pw_cm.start()
-
-        self._context = await self._playwright.chromium.launch_persistent_context(
-            user_data_dir=str(_BROWSER_DATA),
-            headless=headless,
-            viewport={"width": 1920, "height": 1080},
-            user_agent=_UA,
-        )
-
+        self._context = await self._launch_context(headless)
         self._page = await self._context.new_page()
-        await stealth_async(self._page)
         self._initialized = True
         logger.info("MCP: 小红书浏览器就绪")
 
+    async def _is_logged_in(self) -> bool:
+        """通过多层 Fallback 检测是否真正登录（web_session 游客也有）"""
+        method_used = None
+        # 方法1: selfinfo API
+        try:
+            result = await self._page.evaluate("""async () => {
+                try {
+                    const resp = await fetch('/api/sns/web/v1/user/selfinfo', { credentials: 'include' });
+                    const data = await resp.json();
+                    if (data && data.success) return true;
+                    if (data && data.result && data.result.success) return true;
+                    if (data && data.data && data.data.user_id) return true;
+                    return false;
+                } catch(e) { return false; }
+            }""")
+            if result:
+                method_used = "selfinfo_api"
+                logger.info("MCP: 登录检测通过 (method=%s)", method_used)
+                return True
+        except Exception as e:
+            logger.warning("MCP: selfinfo API 检测失败: %s", e)
+
+        # 方法2: DOM 元素检测
+        try:
+            avatar = await self._page.query_selector(
+                '.user-avatar, .side-bar .avatar-wrapper, [class*="avatar"]'
+            )
+            if avatar:
+                method_used = "dom_avatar"
+                logger.info("MCP: 登录检测通过 (method=%s)", method_used)
+                return True
+        except Exception as e:
+            logger.warning("MCP: DOM 元素检测失败: %s", e)
+
+        # 方法3: Cookie 检测
+        try:
+            cookies = await self._context.cookies()
+            has_session = any(
+                c.get("name") == "web_session" and c.get("value")
+                for c in cookies
+            )
+            if has_session:
+                method_used = "cookie_session"
+                logger.info("MCP: 登录检测通过 (method=%s)", method_used)
+                return True
+        except Exception as e:
+            logger.warning("MCP: Cookie 检测失败: %s", e)
+
+        logger.warning("MCP: 所有登录检测方法均失败")
+        return False
+
     async def check_auth(self) -> bool:
-        """检查登录态"""
         if not _BROWSER_DATA.exists():
             return False
         try:
             await self.init_browser(headless=True)
             await self._page.goto(_XHS_INDEX, wait_until="domcontentloaded", timeout=30000)
             await self._page.wait_for_timeout(2000)
-            cookies = await self._context.cookies()
-            cookie_dict = {c["name"]: c["value"] for c in cookies}
-            has_session = bool(cookie_dict.get("web_session"))
-            logger.info("MCP: check_auth web_session=%s", "存在" if has_session else "不存在")
-            return has_session
+            logged_in = await self._is_logged_in()
+            logger.info("MCP: check_auth 已登录=%s", logged_in)
+            return logged_in
         except Exception as e:
             logger.warning("MCP: check_auth 异常: %s", e)
+            raise BrowserLaunchError(str(e)) from e
+
+    async def _check_captcha(self) -> bool:
+        """检查页面是否存在验证码提示"""
+        try:
+            captcha = await self._page.query_selector(
+                '#captcha, .captcha-container, [class*="verify"], [class*="captcha"]'
+            )
+            return captcha is not None
+        except Exception:
             return False
 
-    async def search(self, query: str, limit: int = 10) -> SearchData:
-        """在浏览器内执行搜索，从 __INITIAL_STATE__ 提取结果"""
+    async def search(self, query: str, limit: int = 10, note_type: str = "all") -> SearchData:
         if not self._initialized:
             await self.init_browser(headless=True)
 
-        search_url = self._make_search_url(query)
+        search_url = self._make_search_url(query, note_type)
         logger.info("MCP: 导航到搜索页: %s", search_url)
-
         await self._page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
 
         try:
@@ -130,15 +200,15 @@ class XhsBrowserSearcher:
                 window.__INITIAL_STATE__.search.feeds) {
                 const feeds = window.__INITIAL_STATE__.search.feeds;
                 const feedsData = feeds.value !== undefined ? feeds.value : feeds._value;
-                if (feedsData) {
-                    return JSON.stringify(feedsData);
-                }
+                if (feedsData) return JSON.stringify(feedsData);
             }
             return "";
         }""")
 
         if not raw_json:
             logger.warning("MCP: 搜索结果为空 (query='%s')", query)
+            if await self._check_captcha():
+                raise CaptchaDetectedError("搜索结果为空且检测到验证码")
             return SearchData(total_requested=limit, total_returned=0)
 
         try:
@@ -148,35 +218,22 @@ class XhsBrowserSearcher:
             return SearchData(total_requested=limit, total_returned=0)
 
         items = self._parse_feeds(feeds, limit)
+        if not items:
+            if await self._check_captcha():
+                raise CaptchaDetectedError("搜索结果为空且检测到验证码")
+            return SearchData(total_requested=limit, total_returned=0)
         logger.info("MCP: 搜索完成，返回 %d 条结果 (query='%s')", len(items), query)
-
-        return SearchData(
-            results=items,
-            total_requested=limit,
-            total_returned=len(items),
-        )
+        return SearchData(results=items, total_requested=limit, total_returned=len(items))
 
     async def login(self, timeout: float = 300):
-        """弹出可见浏览器让用户扫码登录"""
         await self.close()
-
         logger.info("=" * 50)
         logger.info("MCP: 需要登录小红书，即将弹出浏览器窗口")
         logger.info("请手动登录，登录成功后自动检测（最多等 5 分钟）")
         logger.info("=" * 50)
 
-        _BROWSER_DATA.mkdir(parents=True, exist_ok=True)
-        self._pw_cm = async_playwright()
-        self._playwright = await self._pw_cm.start()
-        self._context = await self._playwright.chromium.launch_persistent_context(
-            user_data_dir=str(_BROWSER_DATA),
-            headless=False,
-            viewport={"width": 1920, "height": 1080},
-            user_agent=_UA,
-        )
-
+        self._context = await self._launch_context(headless=False)
         self._page = await self._context.new_page()
-        await stealth_async(self._page)
         await self._page.goto(_XHS_INDEX, wait_until="domcontentloaded", timeout=30000)
 
         logged_in = False
@@ -185,21 +242,24 @@ class XhsBrowserSearcher:
             await self._page.wait_for_timeout(5000)
             cookies = await self._context.cookies()
             cookie_dict = {c["name"]: c["value"] for c in cookies}
-            if cookie_dict.get("web_session"):
-                logger.info("MCP: web_session 已检测到，登录成功！")
+            if not cookie_dict.get("web_session"):
+                if i % 6 == 0:
+                    logger.info("等待登录中... (%ds / %ds)", (i + 1) * 5, int(timeout))
+                continue
+            # web_session 存在，用 selfinfo 验证是否真正登录
+            if await self._is_logged_in():
+                logger.info("MCP: selfinfo 验证通过，登录成功！")
                 logged_in = True
                 break
             if i % 6 == 0:
-                logger.info("等待登录中... (%ds / %ds)", (i + 1) * 5, int(timeout))
+                logger.info("web_session 存在但未真正登录，继续等待... (%ds / %ds)", (i + 1) * 5, int(timeout))
 
         if not logged_in:
             await self.close()
             raise RuntimeError(f"登录超时（{int(timeout)}秒）")
-
         await self.close()
 
     async def close(self):
-        """关闭浏览器"""
         self._initialized = False
         self._page = None
         try:
@@ -213,67 +273,136 @@ class XhsBrowserSearcher:
         except Exception:
             pass
 
+    _NOTE_TYPE_MAP = {"normal": "1", "video": "2"}
+
     @staticmethod
-    def _make_search_url(keyword: str) -> str:
-        params = urllib.parse.urlencode({
-            "keyword": keyword,
-            "source": "web_explore_feed",
-        })
-        return f"https://www.xiaohongshu.com/search_result?{params}"
+    def _make_search_url(keyword: str, note_type: str = "all") -> str:
+        params = {"keyword": keyword, "source": "web_explore_feed"}
+        if note_type in XhsBrowserSearcher._NOTE_TYPE_MAP:
+            params["type"] = XhsBrowserSearcher._NOTE_TYPE_MAP[note_type]
+        return f"https://www.xiaohongshu.com/search_result?{urllib.parse.urlencode(params)}"
 
     @staticmethod
     def _parse_feeds(feeds: list, limit: int) -> List[SearchResultItem]:
-        """从 __INITIAL_STATE__ 的 feeds 数组解析搜索结果"""
         items = []
-        for feed in feeds[:limit]:
+        for feed in feeds:
+            if len(items) >= limit:
+                break
             try:
                 note_card = feed.get("note_card") or feed.get("noteCard") or {}
                 note_id = feed.get("id") or note_card.get("noteId") or ""
                 xsec_token = feed.get("xsec_token") or feed.get("xsecToken") or ""
-
-                display_title = (
-                    note_card.get("display_title")
-                    or note_card.get("displayTitle")
-                    or ""
-                )
+                display_title = note_card.get("display_title") or note_card.get("displayTitle") or ""
+                if not display_title.strip():
+                    continue  # R1: 跳过空标题条目（广告位等）
                 interact_info = note_card.get("interact_info") or note_card.get("interactInfo") or {}
                 liked_count = interact_info.get("liked_count") or interact_info.get("likedCount") or "0"
-
                 user = note_card.get("user") or {}
                 nickname = user.get("nickname") or user.get("nick_name") or ""
-
                 cover = note_card.get("cover") or {}
                 cover_url = cover.get("url_default") or cover.get("urlDefault") or ""
-
                 note_type = note_card.get("type") or "normal"
-
+                publish_time = str(note_card.get("time") or note_card.get("publishTime") or "")
                 url = (
                     f"https://www.xiaohongshu.com/explore/{note_id}"
                     f"?xsec_token={xsec_token}&xsec_source=pc_search"
                 ) if note_id and xsec_token else (
                     f"https://www.xiaohongshu.com/explore/{note_id}" if note_id else ""
                 )
-
                 items.append(SearchResultItem(
-                    id=str(note_id),
-                    title=display_title,
-                    url=url,
-                    snippet=display_title,
-                    cover_url=cover_url,
-                    author=nickname,
+                    id=str(note_id), title=display_title, url=url,
+                    snippet=display_title, cover_url=cover_url, author=nickname,
                     likes=int(str(liked_count).replace("+", "").replace("万", "0000")) if liked_count else 0,
-                    xsec_token=xsec_token,
-                    note_type=note_type,
+                    xsec_token=xsec_token, note_type=note_type,
+                    publish_time=publish_time,
                 ))
             except Exception as e:
                 logger.warning("MCP: 解析 feed 失败: %s", e)
                 continue
         return items
 
-    async def get_note_detail(self, note_id: str, xsec_token: str = "") -> "NoteDetail":
-        """获取笔记详情"""
-        from stride28_search_mcp.models import NoteDetail, CommentItem
+    async def _extract_comments_from_dom(self, max_sub_per_comment: int = 10) -> List["CommentItem"]:
+        """从 DOM 提取当前页面所有可见评论"""
+        from stride28_search_mcp.models import CommentItem
+        comments = []
+        try:
+            comment_elements = await self._page.query_selector_all('.comment-item, .CommentItem, [class*="commentItem"]')
+            for el in comment_elements:
+                try:
+                    text_el = await el.query_selector('.content, .comment-content, [class*="content"]')
+                    text = await text_el.inner_text() if text_el else ""
+                    author_el = await el.query_selector('.author, .nickname, [class*="author"]')
+                    author = await author_el.inner_text() if author_el else ""
+                    if text.strip():
+                        comments.append(CommentItem(text=text.strip(), author=author.strip()))
+                except Exception:
+                    continue
+        except Exception as e:
+            logger.warning("MCP: DOM 评论提取异常: %s", e)
+        return comments
 
+    async def _load_more_comments(self, max_comments: int = 50,
+                                   max_duration: float = 30.0,
+                                   max_empty_loads: int = 3,
+                                   max_selector_failures: int = 3) -> List["CommentItem"]:
+        """滚动加载更多评论，带硬停止条件"""
+        import time
+        comments = []
+        start_time = time.monotonic()
+        consecutive_empty = 0
+        selector_failures = 0
+        stop_reason = None
+
+        for _ in range(max(max_comments // 5, 1)):
+            if len(comments) >= max_comments:
+                break
+
+            # 硬停止条件 1: 总耗时
+            elapsed = time.monotonic() - start_time
+            if elapsed >= max_duration:
+                stop_reason = f"max_duration={max_duration}s exceeded (elapsed={elapsed:.1f}s)"
+                break
+
+            try:
+                more_btn = await self._page.query_selector(
+                    'text="查看更多评论", text="展开更多评论"'
+                )
+                if more_btn:
+                    await more_btn.click()
+                    await self._page.wait_for_timeout(1500)
+                    selector_failures = 0
+                else:
+                    # 硬停止条件 3: selector 失效
+                    selector_failures += 1
+                    if selector_failures >= max_selector_failures:
+                        stop_reason = f"selector_failures={selector_failures} reached limit"
+                        break
+                    await self._page.evaluate(
+                        'document.querySelector(".comments-container, .comment-list, [class*=comment]")?.scrollBy(0, 500)'
+                    )
+                    await self._page.wait_for_timeout(1000)
+
+                new_comments = await self._extract_comments_from_dom()
+                if len(new_comments) <= len(comments):
+                    # 硬停止条件 2: 连续空加载
+                    consecutive_empty += 1
+                    if consecutive_empty >= max_empty_loads:
+                        stop_reason = f"consecutive_empty_loads={consecutive_empty} reached limit"
+                        break
+                else:
+                    consecutive_empty = 0
+                comments = new_comments
+            except Exception as e:
+                logger.warning("MCP: 评论加载异常: %s", e)
+                stop_reason = f"exception: {e}"
+                break
+
+        if stop_reason:
+            logger.warning("MCP: 评论加载硬停止 - %s, 已加载 %d 条", stop_reason, len(comments))
+        return comments[:max_comments]
+
+    async def get_note_detail(self, note_id: str, xsec_token: str = "", max_comments: int = 50) -> "NoteDetail":
+        from stride28_search_mcp.models import NoteDetail, CommentItem
         if not self._initialized:
             await self.init_browser(headless=True)
 
@@ -283,21 +412,17 @@ class XhsBrowserSearcher:
 
         logger.info("MCP: 导航到笔记详情: %s", url)
         await self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
-
         try:
             await self._page.wait_for_load_state("networkidle", timeout=15000)
         except Exception:
             pass
-
         try:
             await self._page.wait_for_function(
                 """() => {
                     return window.__INITIAL_STATE__ &&
                            window.__INITIAL_STATE__.note &&
                            window.__INITIAL_STATE__.note.noteDetailMap;
-                }""",
-                timeout=10000,
-            )
+                }""", timeout=10000)
         except Exception:
             await self._page.wait_for_timeout(3000)
 
@@ -311,76 +436,78 @@ class XhsBrowserSearcher:
                     const keys = Object.keys(detailMap);
                     if (keys.length > 0) detail = detailMap[keys[0]];
                 }
-                if (!detail) return "";
-                return JSON.stringify(detail);
-            } catch(e) {
-                return "";
-            }
+                return detail ? JSON.stringify(detail) : "";
+            } catch(e) { return ""; }
         }""", note_id)
 
         if not raw_json:
-            logger.warning("MCP: 笔记详情为空 (note_id='%s')", note_id)
             return NoteDetail(id=note_id, url=url)
-
         try:
             detail = json.loads(raw_json)
         except json.JSONDecodeError:
-            logger.error("MCP: 笔记详情 JSON 解析失败")
             return NoteDetail(id=note_id, url=url)
 
         data = detail.get("note") or detail
-
         title = data.get("title") or ""
         desc = data.get("desc") or ""
-
         image_list = data.get("imageList") or data.get("image_list") or []
-        image_urls = []
-        for img in image_list:
-            img_url = img.get("urlDefault") or img.get("url_default") or img.get("url") or ""
-            if img_url:
-                image_urls.append(img_url)
-
+        image_urls = [img.get("urlDefault") or img.get("url_default") or img.get("url") or "" for img in image_list]
+        image_urls = [u for u in image_urls if u]
         interact = data.get("interactInfo") or data.get("interact_info") or {}
         likes = self._safe_int(interact.get("likedCount") or interact.get("liked_count") or 0)
         collected = self._safe_int(interact.get("collectedCount") or interact.get("collected_count") or 0)
         comments_count = self._safe_int(interact.get("commentCount") or interact.get("comment_count") or 0)
         shares = self._safe_int(interact.get("shareCount") or interact.get("share_count") or 0)
-
         user = data.get("user") or {}
         author = user.get("nickname") or user.get("nick_name") or ""
-
         tag_list = data.get("tagList") or data.get("tag_list") or []
         tags = [t.get("name", "") for t in tag_list if t.get("name")]
-
         note_type = data.get("type") or "normal"
+        publish_time = str(data.get("time") or data.get("publishTime") or "")
 
+        # 先从 __INITIAL_STATE__ 提取首屏评论
         comments = []
         try:
             comments_data = detail.get("comments") or {}
-            comment_list = comments_data.get("list") or []
-            for c in comment_list[:20]:
+            for c in (comments_data.get("list") or [])[:max_comments]:
                 text = c.get("content") or ""
                 c_user = c.get("userInfo") or c.get("user_info") or {}
                 c_author = c_user.get("nickname") or ""
                 c_likes = self._safe_int(c.get("likeCount") or c.get("like_count") or 0)
                 if text:
                     comments.append(CommentItem(text=text, author=c_author, likes=c_likes))
-                sub_comments = c.get("subComments") or c.get("sub_comments") or []
-                for sc in sub_comments[:5]:
+                for sc in (c.get("subComments") or c.get("sub_comments") or [])[:5]:
+                    if len(comments) >= max_comments:
+                        break
                     sc_text = sc.get("content") or ""
                     sc_user = sc.get("userInfo") or sc.get("user_info") or {}
-                    sc_author = sc_user.get("nickname") or ""
-                    sc_likes = self._safe_int(sc.get("likeCount") or sc.get("like_count") or 0)
                     if sc_text:
-                        comments.append(CommentItem(text=sc_text, author=sc_author, likes=sc_likes))
+                        comments.append(CommentItem(
+                            text=sc_text, author=sc_user.get("nickname", ""),
+                            likes=self._safe_int(sc.get("likeCount") or sc.get("like_count") or 0),
+                        ))
         except Exception as e:
             logger.warning("MCP: 评论提取失败: %s", e)
+
+        # 如果首屏评论不够，尝试翻页加载更多
+        if len(comments) < max_comments:
+            try:
+                more_comments = await self._load_more_comments(
+                    max_comments=max_comments,
+                )
+                if len(more_comments) > len(comments):
+                    comments = more_comments
+            except Exception as e:
+                logger.warning("MCP: 评论翻页加载失败: %s", e)
+
+        comments = comments[:max_comments]
 
         return NoteDetail(
             id=note_id, title=title, url=url, author=author, content=desc,
             likes=likes, collected=collected, comments_count=comments_count,
             shares=shares, image_urls=image_urls, tags=tags,
             top_comments=comments, note_type=note_type,
+            publish_time=publish_time,
         )
 
     @staticmethod

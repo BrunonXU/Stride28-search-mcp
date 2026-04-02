@@ -1,13 +1,29 @@
-browser_data/
+# Python
 __pycache__/
 *.pyc
+*.egg-info/
+build/
+dist/
+
+# 虚拟环境
+.venv*/
+.test-venv/
+.test-site/
+venv/
+
+# 浏览器数据（含登录态，不要提交）
+browser_data/
+.mcp-data/
+
+# IDE / 工具
 .env
 *.log
+.hypothesis/
+.pytest_cache/
+
+# 杂项
 scripts/
 stealth.min.js
-.venv*/
-venv/
-dist/
-build/
-*.egg-info/
 
+##### 
+.kiro/

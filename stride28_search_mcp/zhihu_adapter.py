@@ -9,19 +9,26 @@ import asyncio
 import html
 import json
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Dict, List, Optional
 from urllib.parse import quote
 
 from playwright.async_api import async_playwright, BrowserContext, Page, Response
-from playwright_stealth import stealth_async
 
+try:
+    from playwright_stealth import stealth_async
+    _HAS_STEALTH = True
+except ImportError:
+    _HAS_STEALTH = False
+
+from stride28_search_mcp.adapter import BrowserLaunchError, LoginRequiredError
 from stride28_search_mcp.models import SearchResultItem, SearchData
 
 logger = logging.getLogger(__name__)
 
-_DATA_HOME = Path.home() / ".stride28-search-mcp"
+_DATA_HOME = Path(os.getenv("STRIDE28_SEARCH_MCP_HOME", Path.home() / ".stride28-search-mcp"))
 _BROWSER_DATA = _DATA_HOME / "browser_data" / "zhihu"
 _ZHIHU_URL = "https://www.zhihu.com"
 _UA = (
@@ -55,19 +62,29 @@ class ZhihuBrowserSearcher:
         if self._initialized:
             return
         logger.info("MCP: 初始化知乎浏览器 (headless=%s)...", headless)
-        _BROWSER_DATA.mkdir(parents=True, exist_ok=True)
-        self._pw_cm = async_playwright()
-        self._playwright = await self._pw_cm.start()
-        self._context = await self._playwright.chromium.launch_persistent_context(
-            user_data_dir=str(_BROWSER_DATA),
-            headless=headless,
-            viewport={"width": 1920, "height": 1080},
-            user_agent=_UA,
-        )
-        self._page = await self._context.new_page()
-        await stealth_async(self._page)
-        self._initialized = True
-        logger.info("MCP: 知乎浏览器就绪")
+        try:
+            _BROWSER_DATA.mkdir(parents=True, exist_ok=True)
+            self._pw_cm = async_playwright()
+            self._playwright = await self._pw_cm.start()
+            self._context = await self._playwright.chromium.launch_persistent_context(
+                user_data_dir=str(_BROWSER_DATA),
+                headless=headless,
+                viewport={"width": 1920, "height": 1080},
+                user_agent=_UA,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                ],
+                ignore_default_args=["--enable-automation"],
+            )
+            self._page = await self._context.new_page()
+            if _HAS_STEALTH:
+                await stealth_async(self._page)
+            self._initialized = True
+            logger.info("MCP: 知乎浏览器就绪")
+        except Exception as exc:
+            raise BrowserLaunchError(str(exc)) from exc
 
     async def check_auth(self) -> bool:
         try:
@@ -75,26 +92,36 @@ class ZhihuBrowserSearcher:
             return True
         except Exception as e:
             logger.warning("MCP: 知乎浏览器初始化失败: %s", e)
-            return False
+            raise BrowserLaunchError(str(e)) from e
+
+    async def _is_logged_in(self) -> bool:
+        if not self._initialized:
+            await self.init_browser(headless=True)
+        cookies = await self._context.cookies()
+        return any(cookie.get("name") == "z_c0" and cookie.get("value") for cookie in cookies)
 
     async def search(self, query: str, limit: int = 10) -> SearchData:
         if not self._initialized:
             await self.init_browser(headless=True)
 
         captured: List[dict] = []
+        login_required = False
         capture_event = asyncio.Event()
 
         async def _on_response(response: Response):
+            nonlocal login_required
             if "/api/v4/search_v3" not in response.url:
                 return
             try:
+                if response.status == 401:
+                    login_required = True
+                    capture_event.set()
+                    return
                 if response.status != 200:
                     return
                 body = await response.json()
-                items = body.get("data", [])
-                if items:
-                    captured.extend(items)
-                    capture_event.set()
+                captured.extend(body.get("data", []))
+                capture_event.set()
             except Exception:
                 pass
 
@@ -113,6 +140,9 @@ class ZhihuBrowserSearcher:
             except Exception:
                 pass
 
+        if login_required:
+            raise LoginRequiredError("zhihu")
+
         items = []
         for raw in captured[:limit]:
             if raw.get("type") not in ("search_result", "zvideo"):
@@ -127,9 +157,12 @@ class ZhihuBrowserSearcher:
         logger.info("MCP: 知乎搜索完成，%d 条结果 (query='%s')", len(items), query)
         return SearchData(results=items, total_requested=limit, total_returned=len(items))
 
-    async def get_question_answers(self, question_id: str, limit: int = 5) -> dict:
+    async def get_question_answers(self, question_id: str, limit: int = 5,
+                                    max_content_length: int = 10000) -> dict:
         if not self._initialized:
             await self.init_browser(headless=True)
+        if not await self._is_logged_in():
+            raise LoginRequiredError("zhihu")
 
         tab = await self._context.new_page()
         try:
@@ -146,7 +179,8 @@ class ZhihuBrowserSearcher:
                 logger.warning("MCP: 知乎问题页回答元素未找到，等待额外 3 秒")
                 await tab.wait_for_timeout(3000)
 
-            data = await tab.evaluate("""(limit) => {
+            data = await tab.evaluate("""(args) => {
+                const { limit, maxContentLength } = args;
                 const detailEl = document.querySelector(
                     '.QuestionRichText, .QuestionDetail-main .RichText'
                 );
@@ -186,7 +220,7 @@ class ZhihuBrowserSearcher:
                     const author = authorEl ? authorEl.innerText.trim() : '';
 
                     answers.push({
-                        content: text.substring(0, 3000),
+                        content: maxContentLength > 0 ? text.substring(0, maxContentLength) : text,
                         voteup: voteup,
                         comments: commentCount,
                         author: author
@@ -194,7 +228,7 @@ class ZhihuBrowserSearcher:
                 }
                 answers.sort((a, b) => b.voteup - a.voteup);
                 return { title, questionDetail, answers: answers.slice(0, limit) };
-            }""", limit)
+            }""", {"limit": limit, "maxContentLength": max_content_length})
 
             logger.info("MCP: 知乎问题 %s 提取 %d 条回答", question_id, len(data.get("answers", [])))
             return {
@@ -221,9 +255,16 @@ class ZhihuBrowserSearcher:
             headless=False,
             viewport={"width": 1920, "height": 1080},
             user_agent=_UA,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-first-run",
+                "--no-default-browser-check",
+            ],
+            ignore_default_args=["--enable-automation"],
         )
         self._page = await self._context.new_page()
-        await stealth_async(self._page)
+        if _HAS_STEALTH:
+            await stealth_async(self._page)
         await self._page.goto(f"{_ZHIHU_URL}/signin", wait_until="domcontentloaded", timeout=30000)
 
         logged_in = False

@@ -19,8 +19,22 @@ class ErrorCode(str, Enum):
     LOGIN_REQUIRED = "login_required"
     LOGIN_TIMEOUT = "login_timeout"
     SEARCH_TIMEOUT = "search_timeout"
+    BROWSER_INIT_FAILED = "browser_init_failed"
     BROWSER_CRASHED = "browser_crashed"
     UNKNOWN_ERROR = "unknown_error"
+    CAPTCHA_DETECTED = "captcha_detected"
+
+
+# ErrorCode → retryable 默认映射 (R8)
+_RETRYABLE_MAP: Dict[ErrorCode, bool] = {
+    ErrorCode.LOGIN_REQUIRED: False,
+    ErrorCode.LOGIN_TIMEOUT: True,
+    ErrorCode.SEARCH_TIMEOUT: True,
+    ErrorCode.BROWSER_INIT_FAILED: False,
+    ErrorCode.BROWSER_CRASHED: False,
+    ErrorCode.UNKNOWN_ERROR: False,
+    ErrorCode.CAPTCHA_DETECTED: False,
+}
 
 
 # ============================================================
@@ -43,15 +57,22 @@ class EnvelopeBuilder:
         }, ensure_ascii=False)
 
     @staticmethod
-    def error(platform: str, tool: str, code: ErrorCode, message: str) -> str:
+    def error(platform: str, tool: str, code: ErrorCode, message: str,
+              retryable: Optional[bool] = None) -> str:
         import json
+        if retryable is None:
+            retryable = _RETRYABLE_MAP.get(code, False)
         return json.dumps({
             "ok": False,
             "platform": platform,
             "tool": tool,
             "request_id": str(uuid.uuid4()),
             "data": None,
-            "error": {"code": code.value, "message": message},
+            "error": {
+                "code": code.value,
+                "message": message,
+                "retryable": retryable,
+            },
         }, ensure_ascii=False)
 
 
@@ -70,6 +91,7 @@ class SearchResultItem(BaseModel):
     likes: int = 0
     xsec_token: str = ""
     note_type: str = ""  # "normal" | "video"
+    publish_time: str = ""
 
 
 class SearchData(BaseModel):

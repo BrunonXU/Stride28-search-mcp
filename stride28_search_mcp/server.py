@@ -8,6 +8,7 @@ import asyncio
 import atexit
 import logging
 import signal
+import subprocess
 import sys
 
 _original_stdout = sys.stdout
@@ -24,7 +25,12 @@ from stride28_search_mcp.lifecycle import LifecycleManager
 from stride28_search_mcp.models import (
     EnvelopeBuilder, ErrorCode, LoginData, SearchData,
 )
-from stride28_search_mcp.adapter import LoginRequiredError, BrowserCrashError
+from stride28_search_mcp.adapter import (
+    BrowserCrashError,
+    BrowserLaunchError,
+    CaptchaDetectedError,
+    LoginRequiredError,
+)
 
 # ============================================================
 # 全局实例
@@ -32,6 +38,91 @@ from stride28_search_mcp.adapter import LoginRequiredError, BrowserCrashError
 
 lifecycle = LifecycleManager()
 mcp = FastMCP("stride28-search")
+
+
+def _browser_init_message(exc: Exception) -> str:
+    detail = str(exc).strip()
+    base = (
+        "浏览器初始化失败，请先执行 `stride28-search-mcp install-browser` 安装 Chromium，"
+        "并确认数据目录可写。"
+    )
+    return f"{base} 原始错误: {detail}" if detail else base
+
+
+def _run_doctor() -> int:
+    import importlib
+    import importlib.metadata
+    import json
+    import os
+    import tomllib
+    from pathlib import Path
+
+    data_home = Path(os.getenv("STRIDE28_SEARCH_MCP_HOME", Path.home() / ".stride28-search-mcp"))
+    try:
+        version = importlib.metadata.version("stride28-search-mcp")
+    except importlib.metadata.PackageNotFoundError:
+        pyproject_path = Path(__file__).resolve().parent.parent / "pyproject.toml"
+        with pyproject_path.open("rb") as fh:
+            version = tomllib.load(fh)["project"]["version"]
+    report = {
+        "package": "stride28-search-mcp",
+        "version": version,
+        "python": sys.version.split()[0],
+        "data_home": str(data_home),
+        "checks": {},
+    }
+
+    report["checks"]["python_supported"] = {
+        "ok": sys.version_info >= (3, 10),
+        "detail": "requires Python >= 3.10",
+    }
+
+    for module_name in ("mcp", "playwright", "pydantic"):
+        try:
+            importlib.import_module(module_name)
+            report["checks"][f"import_{module_name}"] = {"ok": True}
+        except Exception as exc:
+            report["checks"][f"import_{module_name}"] = {"ok": False, "detail": str(exc)}
+
+    try:
+        data_home.mkdir(parents=True, exist_ok=True)
+        probe = data_home / ".write_test"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        report["checks"]["data_home_writable"] = {"ok": True}
+    except Exception as exc:
+        report["checks"]["data_home_writable"] = {"ok": False, "detail": str(exc)}
+
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "--dry-run", "chromium"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        install_location = ""
+        for line in result.stdout.splitlines():
+            if "Install location:" in line:
+                install_location = line.split("Install location:", 1)[1].strip()
+                break
+        report["checks"]["chromium_installed"] = {
+            "ok": bool(install_location) and Path(install_location).exists(),
+            "detail": install_location or result.stdout.strip(),
+        }
+    except Exception as exc:
+        report["checks"]["chromium_installed"] = {"ok": False, "detail": str(exc)}
+
+    report["checks"]["xhs_cookie_dir"] = {
+        "ok": True,
+        "detail": str(data_home / "browser_data" / "xhs"),
+    }
+    report["checks"]["zhihu_cookie_dir"] = {
+        "ok": True,
+        "detail": str(data_home / "browser_data" / "zhihu"),
+    }
+
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return 0
 
 # ============================================================
 # Tool: 登录小红书
@@ -48,6 +139,7 @@ mcp = FastMCP("stride28-search")
 )
 async def login_xiaohongshu() -> str:
     platform, tool_name = "xiaohongshu", "login_xiaohongshu"
+    await lifecycle.rate_limiter.acquire(platform, tool_name)
     lock = lifecycle.get_lock(platform)
     async with lock:
         try:
@@ -62,6 +154,11 @@ async def login_xiaohongshu() -> str:
             return EnvelopeBuilder.error(
                 platform, tool_name, ErrorCode.LOGIN_TIMEOUT,
                 "登录超时（5分钟），请重试",
+            )
+        except BrowserLaunchError as e:
+            logger.exception("浏览器初始化异常")
+            return EnvelopeBuilder.error(
+                platform, tool_name, ErrorCode.BROWSER_INIT_FAILED, _browser_init_message(e),
             )
         except Exception as e:
             logger.exception("登录异常")
@@ -83,8 +180,9 @@ async def login_xiaohongshu() -> str:
         "需要先登录（login_xiaohongshu），未登录时返回 login_required 错误。"
     ),
 )
-async def search_xiaohongshu(query: str, limit: int = 10) -> str:
+async def search_xiaohongshu(query: str, limit: int = 10, note_type: str = "all") -> str:
     platform, tool_name = "xiaohongshu", "search_xiaohongshu"
+    await lifecycle.rate_limiter.acquire(platform, tool_name)
 
     if lifecycle.is_crashed(platform):
         return EnvelopeBuilder.error(
@@ -102,10 +200,15 @@ async def search_xiaohongshu(query: str, limit: int = 10) -> str:
                     "小红书未登录或 Cookie 已失效，请先调用 login_xiaohongshu 工具完成登录",
                 )
             search_data = await asyncio.wait_for(
-                searcher.search(query, limit), timeout=60,
+                searcher.search(query, limit, note_type), timeout=60,
             )
             lifecycle.reset_failures(platform)
             return EnvelopeBuilder.success(platform, tool_name, search_data.model_dump())
+        except CaptchaDetectedError:
+            return EnvelopeBuilder.error(
+                platform, tool_name, ErrorCode.CAPTCHA_DETECTED,
+                "搜索结果为空且检测到验证码拦截，请稍后重试或手动处理验证码",
+            )
         except LoginRequiredError:
             return EnvelopeBuilder.error(
                 platform, tool_name, ErrorCode.LOGIN_REQUIRED,
@@ -120,6 +223,11 @@ async def search_xiaohongshu(query: str, limit: int = 10) -> str:
             await lifecycle.destroy_searcher(platform)
             return EnvelopeBuilder.error(
                 platform, tool_name, ErrorCode.UNKNOWN_ERROR, "浏览器异常，已自动重建实例，请重试",
+            )
+        except BrowserLaunchError as e:
+            await lifecycle.destroy_searcher(platform)
+            return EnvelopeBuilder.error(
+                platform, tool_name, ErrorCode.BROWSER_INIT_FAILED, _browser_init_message(e),
             )
         except Exception as e:
             lifecycle.record_failure(platform)
@@ -138,8 +246,9 @@ async def search_xiaohongshu(query: str, limit: int = 10) -> str:
         "需要先登录（login_xiaohongshu）。"
     ),
 )
-async def get_note_detail(note_id: str, xsec_token: str = "") -> str:
+async def get_note_detail(note_id: str, xsec_token: str = "", max_comments: int = 50) -> str:
     platform, tool_name = "xiaohongshu", "get_note_detail"
+    await lifecycle.rate_limiter.acquire(platform, tool_name)
     lock = lifecycle.get_lock(platform)
     async with lock:
         try:
@@ -150,13 +259,18 @@ async def get_note_detail(note_id: str, xsec_token: str = "") -> str:
                     "小红书未登录，请先调用 login_xiaohongshu",
                 )
             detail = await asyncio.wait_for(
-                searcher.get_note_detail(note_id, xsec_token), timeout=30,
+                searcher.get_note_detail(note_id, xsec_token, max_comments), timeout=30,
             )
             lifecycle.reset_failures(platform)
             return EnvelopeBuilder.success(platform, tool_name, detail.model_dump())
         except asyncio.TimeoutError:
             return EnvelopeBuilder.error(
                 platform, tool_name, ErrorCode.SEARCH_TIMEOUT, "获取详情超时（30秒）",
+            )
+        except BrowserLaunchError as e:
+            await lifecycle.destroy_searcher(platform)
+            return EnvelopeBuilder.error(
+                platform, tool_name, ErrorCode.BROWSER_INIT_FAILED, _browser_init_message(e),
             )
         except Exception as e:
             logger.exception("获取详情异常")
@@ -171,12 +285,13 @@ async def get_note_detail(note_id: str, xsec_token: str = "") -> str:
     name="search_zhihu",
     description=(
         "搜索知乎内容（问答、专栏、视频）。"
-        "不需要登录即可使用。"
+        "当前需要先登录（login_zhihu），未登录时返回 login_required 错误。"
         "返回标题、URL、类型、赞数、作者等信息。"
     ),
 )
 async def search_zhihu(query: str, limit: int = 10) -> str:
     platform, tool_name = "zhihu", "search_zhihu"
+    await lifecycle.rate_limiter.acquire(platform, tool_name)
     if lifecycle.is_crashed(platform):
         return EnvelopeBuilder.error(
             platform, tool_name, ErrorCode.BROWSER_CRASHED, "浏览器已崩溃，请重启 MCP Server",
@@ -185,18 +300,25 @@ async def search_zhihu(query: str, limit: int = 10) -> str:
     async with lock:
         try:
             searcher = await lifecycle.get_searcher(platform)
-            if not await searcher.check_auth():
-                return EnvelopeBuilder.error(
-                    platform, tool_name, ErrorCode.UNKNOWN_ERROR, "知乎浏览器初始化失败",
-                )
+            await searcher.check_auth()
             search_data = await asyncio.wait_for(
                 searcher.search(query, limit), timeout=30,
             )
             lifecycle.reset_failures(platform)
             return EnvelopeBuilder.success(platform, tool_name, search_data.model_dump())
+        except LoginRequiredError:
+            return EnvelopeBuilder.error(
+                platform, tool_name, ErrorCode.LOGIN_REQUIRED,
+                "知乎当前需要登录后才能搜索，请先调用 login_zhihu 工具完成登录",
+            )
         except asyncio.TimeoutError:
             return EnvelopeBuilder.error(
                 platform, tool_name, ErrorCode.SEARCH_TIMEOUT, "搜索超时（30秒）",
+            )
+        except BrowserLaunchError as e:
+            await lifecycle.destroy_searcher(platform)
+            return EnvelopeBuilder.error(
+                platform, tool_name, ErrorCode.BROWSER_INIT_FAILED, _browser_init_message(e),
             )
         except Exception as e:
             lifecycle.record_failure(platform)
@@ -212,27 +334,36 @@ async def search_zhihu(query: str, limit: int = 10) -> str:
     name="get_zhihu_question",
     description=(
         "获取知乎问题的详情和 top N 回答。"
+        "当前需要先登录（login_zhihu）。"
         "需要提供 question_id（从搜索结果的 xsec_token 字段获取）。"
     ),
 )
-async def get_zhihu_question(question_id: str, limit: int = 5) -> str:
+async def get_zhihu_question(question_id: str, limit: int = 5, max_content_length: int = 10000) -> str:
     platform, tool_name = "zhihu", "get_zhihu_question"
+    await lifecycle.rate_limiter.acquire(platform, tool_name)
     lock = lifecycle.get_lock(platform)
     async with lock:
         try:
             searcher = await lifecycle.get_searcher(platform)
-            if not await searcher.check_auth():
-                return EnvelopeBuilder.error(
-                    platform, tool_name, ErrorCode.UNKNOWN_ERROR, "知乎浏览器初始化失败",
-                )
+            await searcher.check_auth()
             data = await asyncio.wait_for(
-                searcher.get_question_answers(question_id, limit), timeout=30,
+                searcher.get_question_answers(question_id, limit, max_content_length), timeout=30,
             )
             lifecycle.reset_failures(platform)
             return EnvelopeBuilder.success(platform, tool_name, data)
+        except LoginRequiredError:
+            return EnvelopeBuilder.error(
+                platform, tool_name, ErrorCode.LOGIN_REQUIRED,
+                "知乎当前需要登录后才能获取问题回答，请先调用 login_zhihu 工具完成登录",
+            )
         except asyncio.TimeoutError:
             return EnvelopeBuilder.error(
                 platform, tool_name, ErrorCode.SEARCH_TIMEOUT, "获取回答超时（30秒）",
+            )
+        except BrowserLaunchError as e:
+            await lifecycle.destroy_searcher(platform)
+            return EnvelopeBuilder.error(
+                platform, tool_name, ErrorCode.BROWSER_INIT_FAILED, _browser_init_message(e),
             )
         except Exception as e:
             logger.exception("知乎问题获取异常")
@@ -248,11 +379,12 @@ async def get_zhihu_question(question_id: str, limit: int = 5) -> str:
     description=(
         "登录知乎账号。"
         "调用后会弹出浏览器窗口，需要手动登录。"
-        "登录成功后，get_zhihu_question 可以获取完整回答内容。"
+        "登录成功后，search_zhihu 和 get_zhihu_question 都会复用登录态。"
     ),
 )
 async def login_zhihu() -> str:
     platform, tool_name = "zhihu", "login_zhihu"
+    await lifecycle.rate_limiter.acquire(platform, tool_name)
     lock = lifecycle.get_lock(platform)
     async with lock:
         try:
@@ -266,6 +398,11 @@ async def login_zhihu() -> str:
         except asyncio.TimeoutError:
             return EnvelopeBuilder.error(
                 platform, tool_name, ErrorCode.LOGIN_TIMEOUT, "登录超时（5分钟）",
+            )
+        except BrowserLaunchError as e:
+            logger.exception("知乎浏览器初始化异常")
+            return EnvelopeBuilder.error(
+                platform, tool_name, ErrorCode.BROWSER_INIT_FAILED, _browser_init_message(e),
             )
         except Exception as e:
             logger.exception("知乎登录异常")
@@ -302,6 +439,14 @@ if sys.platform != "win32":
 # ============================================================
 
 def main():
+    if len(sys.argv) > 1:
+        if sys.argv[1] == "install-browser":
+            raise SystemExit(subprocess.call([sys.executable, "-m", "playwright", "install", "chromium"]))
+        if sys.argv[1] == "doctor":
+            raise SystemExit(_run_doctor())
+        if sys.argv[1] in {"-h", "--help", "help"}:
+            print("Usage: stride28-search-mcp [install-browser|doctor]")
+            raise SystemExit(0)
     sys.stdout = _original_stdout
     mcp.run(transport="stdio")
 
