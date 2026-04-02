@@ -24,22 +24,25 @@
 
 ## 快速开始
 
-### 1. 安装
+### 安装
+
+推荐使用 `uv` 或 `pipx`，一行搞定：
 
 ```bash
-git clone https://github.com/BrunonXU/Stride28-search-mcp.git
-cd Stride28-search-mcp
-python -m venv .venv
-# Windows
-.venv\Scripts\activate
-# macOS/Linux
-source .venv/bin/activate
+# uv（推荐）
+uv tool install stride28-search-mcp
 
-pip install -r requirements.txt
+# 或 pipx
+pipx install stride28-search-mcp
+```
+
+安装后需要确保 Playwright 浏览器已下载：
+
+```bash
 playwright install chromium
 ```
 
-### 2. 配置 MCP Client
+### 配置 MCP Client
 
 在你的 AI 客户端（Kiro / Cursor / Claude Code / VS Code）的 MCP 配置中添加：
 
@@ -47,23 +50,28 @@ playwright install chromium
 {
   "mcpServers": {
     "stride28-search": {
-      "command": "/path/to/Stride28-search-mcp/.venv/bin/python",
-      "args": ["/path/to/Stride28-search-mcp/mcp_server.py"],
+      "command": "stride28-search-mcp",
       "disabled": false
     }
   }
 }
 ```
 
-Windows 用户把路径改成：
+如果用 `uvx` 免安装运行：
+
 ```json
 {
-  "command": "C:\\path\\to\\Stride28-search-mcp\\.venv\\Scripts\\python.exe",
-  "args": ["C:\\path\\to\\Stride28-search-mcp\\mcp_server.py"]
+  "mcpServers": {
+    "stride28-search": {
+      "command": "uvx",
+      "args": ["stride28-search-mcp"],
+      "disabled": false
+    }
+  }
 }
 ```
 
-### 3. 使用
+### 使用
 
 跟 AI 助手说：
 
@@ -73,25 +81,34 @@ Windows 用户把路径改成：
 
 AI 会自动调用对应的 MCP tool，首次使用小红书会弹出浏览器让你扫码登录。
 
+### 从源码安装（开发用）
+
+```bash
+git clone https://github.com/BrunonXU/Stride28-search-mcp.git
+cd Stride28-search-mcp
+pip install -e .
+playwright install chromium
+```
+
 ## 项目结构
 
 ```
 Stride28-search-mcp/
-├── mcp_server.py           # MCP Server 入口（stdio transport）
-├── src/mcp/
-│   ├── adapter.py          # 小红书浏览器搜索适配器
-│   ├── zhihu_adapter.py    # 知乎浏览器搜索适配器
-│   ├── lifecycle.py        # 搜索器生命周期管理
-│   └── models.py           # 数据模型（Envelope/SearchResult/NoteDetail）
-├── requirements.txt
-└── browser_data/            # Cookie 持久化目录（自动创建，已 gitignore）
+├── pyproject.toml                  # 打包配置
+├── stride28_search_mcp/
+│   ├── server.py                   # MCP Server 入口
+│   ├── adapter.py                  # 小红书浏览器搜索适配器
+│   ├── zhihu_adapter.py            # 知乎浏览器搜索适配器
+│   ├── lifecycle.py                # 搜索器生命周期管理
+│   └── models.py                   # 数据模型
+└── browser_data/                   # Cookie 持久化（~/.stride28-search-mcp/）
 ```
 
 ## 注意事项
 
 - 小红书需要扫码登录才能搜索，知乎搜索不需要登录
 - 知乎获取问题详情（`get_zhihu_question`）需要登录
-- `browser_data/` 目录存储登录 Cookie，不要提交到 git
+- 浏览器数据存储在 `~/.stride28-search-mcp/browser_data/`，不会污染项目目录
 - 首次运行 `playwright install chromium` 会下载约 150MB 的浏览器
 
 ## 兼容的 MCP 客户端

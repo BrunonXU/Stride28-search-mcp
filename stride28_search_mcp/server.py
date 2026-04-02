@@ -1,9 +1,6 @@
-"""Stride28 MCP 搜索服务 —— 小红书纯浏览器方案
+"""Stride28 MCP 搜索服务 —— 小红书 + 知乎
 
 使用 Playwright 浏览器内操作，不调 API，不需要签名。
-搜索通过导航到搜索页 + 提取 __INITIAL_STATE__ 实现。
-
-启动方式：由 Kiro MCP 配置自动管理（stdio transport）
 """
 from __future__ import annotations
 
@@ -12,12 +9,9 @@ import atexit
 import logging
 import signal
 import sys
-from pathlib import Path
 
-# MCP stdio transport 需要真正的 stdout，先保存
 _original_stdout = sys.stdout
 
-# 日志输出到 stderr（MCP 协议占用 stdout）
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
@@ -25,16 +19,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# 确保项目根目录在 path 中
-_PROJECT_ROOT = Path(__file__).resolve().parent
-sys.path.insert(0, str(_PROJECT_ROOT))
-
 from mcp.server.fastmcp import FastMCP
-from src.mcp.lifecycle import LifecycleManager
-from src.mcp.models import (
+from stride28_search_mcp.lifecycle import LifecycleManager
+from stride28_search_mcp.models import (
     EnvelopeBuilder, ErrorCode, LoginData, SearchData,
 )
-from src.mcp.adapter import LoginRequiredError, BrowserCrashError
+from stride28_search_mcp.adapter import LoginRequiredError, BrowserCrashError
 
 # ============================================================
 # 全局实例
@@ -63,7 +53,6 @@ async def login_xiaohongshu() -> str:
         try:
             searcher = await lifecycle.get_searcher(platform)
             await searcher.login(timeout=300)
-            # 登录后销毁搜索器，下次搜索时重建（加载新 cookie）
             await lifecycle.destroy_searcher(platform)
             return EnvelopeBuilder.success(
                 platform, tool_name,
@@ -94,10 +83,7 @@ async def login_xiaohongshu() -> str:
         "需要先登录（login_xiaohongshu），未登录时返回 login_required 错误。"
     ),
 )
-async def search_xiaohongshu(
-    query: str,
-    limit: int = 10,
-) -> str:
+async def search_xiaohongshu(query: str, limit: int = 10) -> str:
     platform, tool_name = "xiaohongshu", "search_xiaohongshu"
 
     if lifecycle.is_crashed(platform):
@@ -110,24 +96,16 @@ async def search_xiaohongshu(
     async with lock:
         try:
             searcher = await lifecycle.get_searcher(platform)
-
-            # 检查登录态
             if not await searcher.check_auth():
                 return EnvelopeBuilder.error(
                     platform, tool_name, ErrorCode.LOGIN_REQUIRED,
                     "小红书未登录或 Cookie 已失效，请先调用 login_xiaohongshu 工具完成登录",
                 )
-
-            # 执行搜索
             search_data = await asyncio.wait_for(
-                searcher.search(query, limit),
-                timeout=60,
+                searcher.search(query, limit), timeout=60,
             )
             lifecycle.reset_failures(platform)
-            return EnvelopeBuilder.success(
-                platform, tool_name, search_data.model_dump(),
-            )
-
+            return EnvelopeBuilder.success(platform, tool_name, search_data.model_dump())
         except LoginRequiredError:
             return EnvelopeBuilder.error(
                 platform, tool_name, ErrorCode.LOGIN_REQUIRED,
@@ -135,23 +113,18 @@ async def search_xiaohongshu(
             )
         except asyncio.TimeoutError:
             return EnvelopeBuilder.error(
-                platform, tool_name, ErrorCode.SEARCH_TIMEOUT,
-                "搜索超时（60秒），请稍后重试",
+                platform, tool_name, ErrorCode.SEARCH_TIMEOUT, "搜索超时（60秒），请稍后重试",
             )
         except BrowserCrashError:
             lifecycle.record_failure(platform)
             await lifecycle.destroy_searcher(platform)
             return EnvelopeBuilder.error(
-                platform, tool_name, ErrorCode.UNKNOWN_ERROR,
-                "浏览器异常，已自动重建实例，请重试",
+                platform, tool_name, ErrorCode.UNKNOWN_ERROR, "浏览器异常，已自动重建实例，请重试",
             )
         except Exception as e:
             lifecycle.record_failure(platform)
             logger.exception("搜索异常")
-            return EnvelopeBuilder.error(
-                platform, tool_name, ErrorCode.UNKNOWN_ERROR, str(e),
-            )
-
+            return EnvelopeBuilder.error(platform, tool_name, ErrorCode.UNKNOWN_ERROR, str(e))
 
 # ============================================================
 # Tool: 获取笔记详情
@@ -165,42 +138,29 @@ async def search_xiaohongshu(
         "需要先登录（login_xiaohongshu）。"
     ),
 )
-async def get_note_detail(
-    note_id: str,
-    xsec_token: str = "",
-) -> str:
+async def get_note_detail(note_id: str, xsec_token: str = "") -> str:
     platform, tool_name = "xiaohongshu", "get_note_detail"
-
     lock = lifecycle.get_lock(platform)
     async with lock:
         try:
             searcher = await lifecycle.get_searcher(platform)
-
             if not await searcher.check_auth():
                 return EnvelopeBuilder.error(
                     platform, tool_name, ErrorCode.LOGIN_REQUIRED,
                     "小红书未登录，请先调用 login_xiaohongshu",
                 )
-
             detail = await asyncio.wait_for(
-                searcher.get_note_detail(note_id, xsec_token),
-                timeout=30,
+                searcher.get_note_detail(note_id, xsec_token), timeout=30,
             )
             lifecycle.reset_failures(platform)
-            return EnvelopeBuilder.success(
-                platform, tool_name, detail.model_dump(),
-            )
-
+            return EnvelopeBuilder.success(platform, tool_name, detail.model_dump())
         except asyncio.TimeoutError:
             return EnvelopeBuilder.error(
-                platform, tool_name, ErrorCode.SEARCH_TIMEOUT,
-                "获取详情超时（30秒）",
+                platform, tool_name, ErrorCode.SEARCH_TIMEOUT, "获取详情超时（30秒）",
             )
         except Exception as e:
             logger.exception("获取详情异常")
-            return EnvelopeBuilder.error(
-                platform, tool_name, ErrorCode.UNKNOWN_ERROR, str(e),
-            )
+            return EnvelopeBuilder.error(platform, tool_name, ErrorCode.UNKNOWN_ERROR, str(e))
 
 
 # ============================================================
@@ -213,27 +173,21 @@ async def get_note_detail(
         "搜索知乎内容（问答、专栏、视频）。"
         "不需要登录即可使用。"
         "返回标题、URL、类型、赞数、作者等信息。"
-        "搜索结果中 note_type 为 answer 的条目，xsec_token 字段存储 question_id，"
-        "可用于调用 get_zhihu_question 获取完整回答。"
     ),
 )
 async def search_zhihu(query: str, limit: int = 10) -> str:
     platform, tool_name = "zhihu", "search_zhihu"
-
     if lifecycle.is_crashed(platform):
         return EnvelopeBuilder.error(
-            platform, tool_name, ErrorCode.BROWSER_CRASHED,
-            "浏览器已崩溃，请重启 MCP Server",
+            platform, tool_name, ErrorCode.BROWSER_CRASHED, "浏览器已崩溃，请重启 MCP Server",
         )
-
     lock = lifecycle.get_lock(platform)
     async with lock:
         try:
             searcher = await lifecycle.get_searcher(platform)
             if not await searcher.check_auth():
                 return EnvelopeBuilder.error(
-                    platform, tool_name, ErrorCode.UNKNOWN_ERROR,
-                    "知乎浏览器初始化失败",
+                    platform, tool_name, ErrorCode.UNKNOWN_ERROR, "知乎浏览器初始化失败",
                 )
             search_data = await asyncio.wait_for(
                 searcher.search(query, limit), timeout=30,
@@ -259,20 +213,17 @@ async def search_zhihu(query: str, limit: int = 10) -> str:
     description=(
         "获取知乎问题的详情和 top N 回答。"
         "需要提供 question_id（从搜索结果的 xsec_token 字段获取）。"
-        "返回问题标题、描述、以及每个回答的正文、赞数、作者。"
     ),
 )
 async def get_zhihu_question(question_id: str, limit: int = 5) -> str:
     platform, tool_name = "zhihu", "get_zhihu_question"
-
     lock = lifecycle.get_lock(platform)
     async with lock:
         try:
             searcher = await lifecycle.get_searcher(platform)
             if not await searcher.check_auth():
                 return EnvelopeBuilder.error(
-                    platform, tool_name, ErrorCode.UNKNOWN_ERROR,
-                    "知乎浏览器初始化失败",
+                    platform, tool_name, ErrorCode.UNKNOWN_ERROR, "知乎浏览器初始化失败",
                 )
             data = await asyncio.wait_for(
                 searcher.get_question_answers(question_id, limit), timeout=30,
@@ -298,7 +249,6 @@ async def get_zhihu_question(question_id: str, limit: int = 5) -> str:
         "登录知乎账号。"
         "调用后会弹出浏览器窗口，需要手动登录。"
         "登录成功后，get_zhihu_question 可以获取完整回答内容。"
-        "search_zhihu 不需要登录也能用。"
     ),
 )
 async def login_zhihu() -> str:
@@ -351,6 +301,10 @@ if sys.platform != "win32":
 # 入口
 # ============================================================
 
-if __name__ == "__main__":
+def main():
     sys.stdout = _original_stdout
     mcp.run(transport="stdio")
+
+
+if __name__ == "__main__":
+    main()

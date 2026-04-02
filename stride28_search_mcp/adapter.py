@@ -1,11 +1,7 @@
 """MCP 小红书搜索适配器 —— 纯浏览器方案
 
-不使用 httpx 调 API，所有操作都在 Playwright 浏览器内完成：
-- 登录：persistent context + 扫码
-- 搜索：导航到搜索页 + 提取 __INITIAL_STATE__
-- 登录检测：检查 web_session cookie
-
-参考：https://github.com/xpzouying/xiaohongshu-mcp
+使用 Playwright 浏览器内操作，不调 API，不需要签名。
+搜索通过导航到搜索页 + 提取 __INITIAL_STATE__ 实现。
 """
 from __future__ import annotations
 
@@ -18,13 +14,14 @@ from typing import List, Optional
 
 from playwright.async_api import async_playwright, BrowserContext, Page
 
-from src.mcp.models import SearchResultItem, SearchData
+from stride28_search_mcp.models import SearchResultItem, SearchData
 
 logger = logging.getLogger(__name__)
 
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-_BROWSER_DATA = _PROJECT_ROOT / "browser_data" / "xhs"
-_STEALTH_JS = _PROJECT_ROOT / "stealth.min.js"
+# 浏览器数据存放在用户目录下，避免依赖项目路径
+_DATA_HOME = Path.home() / ".stride28-search-mcp"
+_BROWSER_DATA = _DATA_HOME / "browser_data" / "xhs"
+_STEALTH_JS = Path(__file__).resolve().parent / "stealth.min.js"
 _XHS_INDEX = "https://www.xiaohongshu.com/explore"
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -49,11 +46,7 @@ class BrowserCrashError(Exception):
 # ============================================================
 
 class XhsBrowserSearcher:
-    """纯浏览器小红书搜索器
-
-    所有操作都在 Playwright persistent context 内完成，
-    不使用 httpx，不调 API，不需要签名。
-    """
+    """纯浏览器小红书搜索器"""
 
     def __init__(self):
         self._pw_cm = None
@@ -68,6 +61,7 @@ class XhsBrowserSearcher:
             return
 
         logger.info("MCP: 初始化小红书浏览器 (headless=%s)...", headless)
+        _BROWSER_DATA.mkdir(parents=True, exist_ok=True)
         self._pw_cm = async_playwright()
         self._playwright = await self._pw_cm.start()
 
@@ -85,12 +79,11 @@ class XhsBrowserSearcher:
         logger.info("MCP: 小红书浏览器就绪")
 
     async def check_auth(self) -> bool:
-        """检查登录态：persistent context 目录存在 + web_session cookie"""
+        """检查登录态"""
         if not _BROWSER_DATA.exists():
             return False
         try:
             await self.init_browser(headless=True)
-            # 导航到首页触发 cookie 加载
             await self._page.goto(_XHS_INDEX, wait_until="domcontentloaded", timeout=30000)
             await self._page.wait_for_timeout(2000)
             cookies = await self._context.cookies()
@@ -112,11 +105,10 @@ class XhsBrowserSearcher:
 
         await self._page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
 
-        # 等待页面网络空闲 + __INITIAL_STATE__.search.feeds 有数据
         try:
             await self._page.wait_for_load_state("networkidle", timeout=15000)
         except Exception:
-            pass  # networkidle 超时不致命
+            pass
 
         try:
             await self._page.wait_for_function(
@@ -133,7 +125,6 @@ class XhsBrowserSearcher:
             logger.warning("MCP: __INITIAL_STATE__.search.feeds 未加载或为空，再等 3 秒...")
             await self._page.wait_for_timeout(3000)
 
-        # 从 __INITIAL_STATE__ 提取搜索结果
         raw_json = await self._page.evaluate("""() => {
             if (window.__INITIAL_STATE__ &&
                 window.__INITIAL_STATE__.search &&
@@ -151,7 +142,6 @@ class XhsBrowserSearcher:
             logger.warning("MCP: 搜索结果为空 (query='%s')", query)
             return SearchData(total_requested=limit, total_returned=0)
 
-        # 解析 feeds JSON
         try:
             feeds = json.loads(raw_json)
         except json.JSONDecodeError as e:
@@ -169,7 +159,6 @@ class XhsBrowserSearcher:
 
     async def login(self, timeout: float = 300):
         """弹出可见浏览器让用户扫码登录"""
-        # 关闭现有 headless 浏览器
         await self.close()
 
         logger.info("=" * 50)
@@ -177,6 +166,7 @@ class XhsBrowserSearcher:
         logger.info("请手动登录，登录成功后自动检测（最多等 5 分钟）")
         logger.info("=" * 50)
 
+        _BROWSER_DATA.mkdir(parents=True, exist_ok=True)
         self._pw_cm = async_playwright()
         self._playwright = await self._pw_cm.start()
         self._context = await self._playwright.chromium.launch_persistent_context(
@@ -191,7 +181,6 @@ class XhsBrowserSearcher:
         self._page = await self._context.new_page()
         await self._page.goto(_XHS_INDEX, wait_until="domcontentloaded", timeout=30000)
 
-        # 轮询等待 web_session cookie
         logged_in = False
         max_polls = int(timeout / 5)
         for i in range(max_polls):
@@ -209,7 +198,6 @@ class XhsBrowserSearcher:
             await self.close()
             raise RuntimeError(f"登录超时（{int(timeout)}秒）")
 
-        # 登录成功，关闭可见浏览器，下次搜索时重新 headless 启动
         await self.close()
 
     async def close(self):
@@ -227,8 +215,6 @@ class XhsBrowserSearcher:
         except Exception:
             pass
 
-    # ---- 内部方法 ----
-
     @staticmethod
     def _make_search_url(keyword: str) -> str:
         params = urllib.parse.urlencode({
@@ -244,7 +230,6 @@ class XhsBrowserSearcher:
         for feed in feeds[:limit]:
             try:
                 note_card = feed.get("note_card") or feed.get("noteCard") or {}
-                # feed 可能直接包含 id，也可能在 note_card 里
                 note_id = feed.get("id") or note_card.get("noteId") or ""
                 xsec_token = feed.get("xsec_token") or feed.get("xsecToken") or ""
 
@@ -253,19 +238,15 @@ class XhsBrowserSearcher:
                     or note_card.get("displayTitle")
                     or ""
                 )
-                # 互动数据
                 interact_info = note_card.get("interact_info") or note_card.get("interactInfo") or {}
                 liked_count = interact_info.get("liked_count") or interact_info.get("likedCount") or "0"
 
-                # 用户信息
                 user = note_card.get("user") or {}
                 nickname = user.get("nickname") or user.get("nick_name") or ""
 
-                # 封面
                 cover = note_card.get("cover") or {}
                 cover_url = cover.get("url_default") or cover.get("urlDefault") or ""
 
-                # 笔记类型
                 note_type = note_card.get("type") or "normal"
 
                 url = (
@@ -279,7 +260,7 @@ class XhsBrowserSearcher:
                     id=str(note_id),
                     title=display_title,
                     url=url,
-                    snippet=display_title,  # __INITIAL_STATE__ 没有摘要，用标题代替
+                    snippet=display_title,
                     cover_url=cover_url,
                     author=nickname,
                     likes=int(str(liked_count).replace("+", "").replace("万", "0000")) if liked_count else 0,
@@ -291,15 +272,13 @@ class XhsBrowserSearcher:
                 continue
         return items
 
-
     async def get_note_detail(self, note_id: str, xsec_token: str = "") -> "NoteDetail":
-        """获取笔记详情：导航到笔记页，从 __INITIAL_STATE__ 提取正文、评论、图片"""
-        from src.mcp.models import NoteDetail, CommentItem
+        """获取笔记详情"""
+        from stride28_search_mcp.models import NoteDetail, CommentItem
 
         if not self._initialized:
             await self.init_browser(headless=True)
 
-        # 构建 URL（带 xsec_token）
         url = f"https://www.xiaohongshu.com/explore/{note_id}"
         if xsec_token:
             url += f"?xsec_token={xsec_token}&xsec_source=pc_search"
@@ -307,7 +286,6 @@ class XhsBrowserSearcher:
         logger.info("MCP: 导航到笔记详情: %s", url)
         await self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
 
-        # 等待页面加载
         try:
             await self._page.wait_for_load_state("networkidle", timeout=15000)
         except Exception:
@@ -325,12 +303,10 @@ class XhsBrowserSearcher:
         except Exception:
             await self._page.wait_for_timeout(3000)
 
-        # 从 __INITIAL_STATE__ 提取笔记详情（完整 detail 包含 note + comments）
         raw_json = await self._page.evaluate("""(noteId) => {
             try {
                 const state = window.__INITIAL_STATE__;
                 if (!state || !state.note || !state.note.noteDetailMap) return "";
-
                 const detailMap = state.note.noteDetailMap;
                 let detail = detailMap[noteId];
                 if (!detail) {
@@ -338,8 +314,6 @@ class XhsBrowserSearcher:
                     if (keys.length > 0) detail = detailMap[keys[0]];
                 }
                 if (!detail) return "";
-
-                // 返回完整 detail（包含 note + comments）
                 return JSON.stringify(detail);
             } catch(e) {
                 return "";
@@ -356,14 +330,11 @@ class XhsBrowserSearcher:
             logger.error("MCP: 笔记详情 JSON 解析失败")
             return NoteDetail(id=note_id, url=url)
 
-        # detail 结构: { note: {...}, comments: { list: [...], cursor, hasMore } }
         data = detail.get("note") or detail
 
-        # 解析正文
         title = data.get("title") or ""
         desc = data.get("desc") or ""
 
-        # 图片
         image_list = data.get("imageList") or data.get("image_list") or []
         image_urls = []
         for img in image_list:
@@ -371,25 +342,20 @@ class XhsBrowserSearcher:
             if img_url:
                 image_urls.append(img_url)
 
-        # 互动数据
         interact = data.get("interactInfo") or data.get("interact_info") or {}
         likes = self._safe_int(interact.get("likedCount") or interact.get("liked_count") or 0)
         collected = self._safe_int(interact.get("collectedCount") or interact.get("collected_count") or 0)
         comments_count = self._safe_int(interact.get("commentCount") or interact.get("comment_count") or 0)
         shares = self._safe_int(interact.get("shareCount") or interact.get("share_count") or 0)
 
-        # 作者
         user = data.get("user") or {}
         author = user.get("nickname") or user.get("nick_name") or ""
 
-        # 标签
         tag_list = data.get("tagList") or data.get("tag_list") or []
         tags = [t.get("name", "") for t in tag_list if t.get("name")]
 
-        # 笔记类型
         note_type = data.get("type") or "normal"
 
-        # 评论（从 detail.comments.list 提取）
         comments = []
         try:
             comments_data = detail.get("comments") or {}
@@ -401,7 +367,6 @@ class XhsBrowserSearcher:
                 c_likes = self._safe_int(c.get("likeCount") or c.get("like_count") or 0)
                 if text:
                     comments.append(CommentItem(text=text, author=c_author, likes=c_likes))
-                # 子评论也提取
                 sub_comments = c.get("subComments") or c.get("sub_comments") or []
                 for sc in sub_comments[:5]:
                     sc_text = sc.get("content") or ""
@@ -413,23 +378,11 @@ class XhsBrowserSearcher:
         except Exception as e:
             logger.warning("MCP: 评论提取失败: %s", e)
 
-        logger.info("MCP: 笔记详情提取完成: title='%s', 正文%d字, %d张图, %d条评论",
-                     title, len(desc), len(image_urls), len(comments))
-
         return NoteDetail(
-            id=note_id,
-            title=title,
-            url=url,
-            author=author,
-            content=desc,
-            likes=likes,
-            collected=collected,
-            comments_count=comments_count,
-            shares=shares,
-            image_urls=image_urls,
-            tags=tags,
-            top_comments=comments,
-            note_type=note_type,
+            id=note_id, title=title, url=url, author=author, content=desc,
+            likes=likes, collected=collected, comments_count=comments_count,
+            shares=shares, image_urls=image_urls, tags=tags,
+            top_comments=comments, note_type=note_type,
         )
 
     @staticmethod

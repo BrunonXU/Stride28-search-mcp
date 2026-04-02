@@ -7,4 +7,7 @@ scripts/
 stealth.min.js
 .venv*/
 venv/
+dist/
+build/
+*.egg-info/
 

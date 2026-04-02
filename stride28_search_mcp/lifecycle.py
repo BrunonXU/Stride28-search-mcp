@@ -1,15 +1,12 @@
-"""MCP 平台生命周期管理器
-
-管理各平台搜索器的创建、销毁、锁、失败计数。
-"""
+"""MCP 平台生命周期管理器"""
 from __future__ import annotations
 
 import asyncio
 import logging
 from typing import Dict, Optional
 
-from src.mcp.adapter import XhsBrowserSearcher
-from src.mcp.zhihu_adapter import ZhihuBrowserSearcher
+from stride28_search_mcp.adapter import XhsBrowserSearcher
+from stride28_search_mcp.zhihu_adapter import ZhihuBrowserSearcher
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +53,5 @@ class LifecycleManager:
         return self._failures.get(platform, 0) >= _MAX_FAILURES
 
     async def cleanup(self):
-        """关闭所有搜索器"""
         for platform in list(self._searchers.keys()):
             await self.destroy_searcher(platform)

@@ -2,7 +2,6 @@
 
 搜索：导航到搜索页，拦截 /api/v4/search_v3 响应获取 JSON
 问题详情：导航到问题页，从 DOM 提取 top N 回答
-不需要登录即可搜索（登录后内容更完整）
 """
 from __future__ import annotations
 
@@ -17,13 +16,13 @@ from urllib.parse import quote
 
 from playwright.async_api import async_playwright, BrowserContext, Page, Response
 
-from src.mcp.models import SearchResultItem, SearchData
+from stride28_search_mcp.models import SearchResultItem, SearchData
 
 logger = logging.getLogger(__name__)
 
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-_BROWSER_DATA = _PROJECT_ROOT / "browser_data" / "zhihu"
-_STEALTH_JS = _PROJECT_ROOT / "stealth.min.js"
+_DATA_HOME = Path.home() / ".stride28-search-mcp"
+_BROWSER_DATA = _DATA_HOME / "browser_data" / "zhihu"
+_STEALTH_JS = Path(__file__).resolve().parent / "stealth.min.js"
 _ZHIHU_URL = "https://www.zhihu.com"
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -35,7 +34,6 @@ _HTML_TAG_RE = re.compile(r"<[^>]+>")
 
 
 def _strip_html(text: str) -> str:
-    """去除 HTML 标签，解码实体。"""
     if not text:
         return ""
     return html.unescape(_HTML_TAG_RE.sub("", text)).strip()
@@ -44,7 +42,7 @@ def _strip_html(text: str) -> str:
 class ZhihuBrowserSearcher:
     """知乎浏览器搜索器：API 拦截 + DOM 提取"""
 
-    INTERCEPT_TIMEOUT = 10  # 等待 API 响应的超时秒数
+    INTERCEPT_TIMEOUT = 10
 
     def __init__(self):
         self._pw_cm = None
@@ -57,6 +55,7 @@ class ZhihuBrowserSearcher:
         if self._initialized:
             return
         logger.info("MCP: 初始化知乎浏览器 (headless=%s)...", headless)
+        _BROWSER_DATA.mkdir(parents=True, exist_ok=True)
         self._pw_cm = async_playwright()
         self._playwright = await self._pw_cm.start()
         self._context = await self._playwright.chromium.launch_persistent_context(
@@ -72,7 +71,6 @@ class ZhihuBrowserSearcher:
         logger.info("MCP: 知乎浏览器就绪")
 
     async def check_auth(self) -> bool:
-        """知乎不强制登录，只检查浏览器是否初始化。"""
         try:
             await self.init_browser(headless=True)
             return True
@@ -81,7 +79,6 @@ class ZhihuBrowserSearcher:
             return False
 
     async def search(self, query: str, limit: int = 10) -> SearchData:
-        """搜索知乎，拦截 /api/v4/search_v3 响应。"""
         if not self._initialized:
             await self.init_browser(headless=True)
 
@@ -117,7 +114,6 @@ class ZhihuBrowserSearcher:
             except Exception:
                 pass
 
-        # 解析结果
         items = []
         for raw in captured[:limit]:
             if raw.get("type") not in ("search_result", "zvideo"):
@@ -133,7 +129,6 @@ class ZhihuBrowserSearcher:
         return SearchData(results=items, total_requested=limit, total_returned=len(items))
 
     async def get_question_answers(self, question_id: str, limit: int = 5) -> dict:
-        """获取问题详情 + top N 回答（DOM 提取）。"""
         if not self._initialized:
             await self.init_browser(headless=True)
 
@@ -142,7 +137,6 @@ class ZhihuBrowserSearcher:
             url = f"{_ZHIHU_URL}/question/{question_id}"
             logger.info("MCP: 导航到知乎问题页: %s", url)
             await tab.goto(url, wait_until="domcontentloaded", timeout=15000)
-            # 等待页面网络空闲
             try:
                 await tab.wait_for_load_state("networkidle", timeout=10000)
             except Exception:
@@ -218,9 +212,9 @@ class ZhihuBrowserSearcher:
             await tab.close()
 
     async def login(self, timeout: float = 300):
-        """弹出可见浏览器让用户登录知乎。"""
         await self.close()
         logger.info("MCP: 弹出知乎登录窗口...")
+        _BROWSER_DATA.mkdir(parents=True, exist_ok=True)
         self._pw_cm = async_playwright()
         self._playwright = await self._pw_cm.start()
         self._context = await self._playwright.chromium.launch_persistent_context(
@@ -234,7 +228,6 @@ class ZhihuBrowserSearcher:
         self._page = await self._context.new_page()
         await self._page.goto(f"{_ZHIHU_URL}/signin", wait_until="domcontentloaded", timeout=30000)
 
-        # 轮询检测登录（检查 URL 是否跳转离开 signin）
         logged_in = False
         for i in range(int(timeout / 5)):
             await self._page.wait_for_timeout(5000)
@@ -265,8 +258,6 @@ class ZhihuBrowserSearcher:
         except Exception:
             pass
 
-    # ---- 内部方法 ----
-
     @staticmethod
     def _parse_search_item(obj: dict) -> Optional[SearchResultItem]:
         content_type = obj.get("type", "")
@@ -278,7 +269,6 @@ class ZhihuBrowserSearcher:
         if not title:
             return None
 
-        # URL
         question_id = ""
         if content_type == "answer":
             q = obj.get("question", {})
@@ -294,7 +284,6 @@ class ZhihuBrowserSearcher:
 
         desc = _strip_html(obj.get("description", "") or obj.get("excerpt", "") or obj.get("content", ""))
         voteup = int(obj.get("voteup_count", 0) or 0)
-        comments = int(obj.get("comment_count", 0) or 0)
         author = (obj.get("author") or {}).get("name", "")
 
         return SearchResultItem(
@@ -304,6 +293,6 @@ class ZhihuBrowserSearcher:
             snippet=desc[:300] if desc else "",
             author=author,
             likes=voteup,
-            xsec_token=question_id,  # 复用 xsec_token 字段存 question_id
-            note_type=content_type,   # answer / article / zvideo
+            xsec_token=question_id,
+            note_type=content_type,
         )
