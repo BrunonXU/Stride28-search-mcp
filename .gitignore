@@ -1,0 +1,10 @@
+browser_data/
+__pycache__/
+*.pyc
+.env
+*.log
+scripts/
+stealth.min.js
+.venv*/
+venv/
+
