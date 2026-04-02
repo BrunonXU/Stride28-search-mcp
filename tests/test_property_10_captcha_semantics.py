@@ -2,10 +2,12 @@
 """
 **Validates: Requirements 10.1, 10.2, 10.3**
 
-Property 10: For any search operation that returns zero results, if captcha is detected
-on the page, the method must raise CaptchaDetectedError (never return an empty SearchData).
-If captcha is not detected, the method must return a normal empty SearchData with
-total_returned=0.
+Property 10: For any search operation that returns zero results, the empty-result branch
+must be conservative:
+
+- not logged in      -> LoginRequiredError
+- captcha detected   -> CaptchaDetectedError
+- logged in but empty -> SearchBlockedError
 
 Since search() is async and requires a browser, we test the decision logic via a helper
 function that replicates the empty-result branch of search().
@@ -16,37 +18,44 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from stride28_search_mcp.adapter import CaptchaDetectedError
-from stride28_search_mcp.models import SearchData
+from stride28_search_mcp.adapter import (
+    CaptchaDetectedError,
+    LoginRequiredError,
+    SearchBlockedError,
+)
 
 
-def empty_result_handler(captcha_detected: bool, limit: int) -> SearchData:
+def empty_result_handler(logged_in: bool, captcha_detected: bool, query: str) -> None:
     """Replicate the empty result decision logic from search().
 
     When items are empty:
+    - not logged in     → raise LoginRequiredError
     - captcha detected  → raise CaptchaDetectedError
-    - no captcha        → return SearchData(total_returned=0)
+    - otherwise         → raise SearchBlockedError
     """
+    if not logged_in:
+        raise LoginRequiredError("xiaohongshu")
     if captcha_detected:
         raise CaptchaDetectedError("搜索结果为空且检测到验证码")
-    return SearchData(total_requested=limit, total_returned=0)
+    raise SearchBlockedError(f"搜索结果为空，可能是无头拦截、风控或需要重新登录 (query='{query}')")
 
 
 @settings(max_examples=100)
 @given(
+    logged_in=st.booleans(),
     captcha_detected=st.booleans(),
-    limit=st.integers(min_value=1, max_value=100),
+    query=st.text(min_size=1, max_size=20),
 )
-def test_captcha_determines_empty_result_semantics(
-    captcha_detected: bool, limit: int
+def test_empty_result_branch_is_conservative(
+    logged_in: bool, captcha_detected: bool, query: str
 ) -> None:
-    """captcha=True → CaptchaDetectedError; captcha=False → empty SearchData."""
-    if captcha_detected:
+    """Empty search results should never silently succeed."""
+    if not logged_in:
+        with pytest.raises(LoginRequiredError):
+            empty_result_handler(logged_in, captcha_detected, query)
+    elif captcha_detected:
         with pytest.raises(CaptchaDetectedError):
-            empty_result_handler(captcha_detected, limit)
+            empty_result_handler(logged_in, captcha_detected, query)
     else:
-        result = empty_result_handler(captcha_detected, limit)
-        assert isinstance(result, SearchData)
-        assert result.total_returned == 0
-        assert result.total_requested == limit
-        assert result.results == []
+        with pytest.raises(SearchBlockedError):
+            empty_result_handler(logged_in, captcha_detected, query)

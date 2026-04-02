@@ -8,19 +8,16 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import urllib.parse
-from pathlib import Path
 from typing import List, Optional
 
 from playwright.async_api import async_playwright, BrowserContext, Page
 
 from stride28_search_mcp.models import SearchResultItem, SearchData
+from stride28_search_mcp.state import get_browser_data_dir, get_non_login_headless
 
 logger = logging.getLogger(__name__)
 
-_DATA_HOME = Path(os.getenv("STRIDE28_SEARCH_MCP_HOME", Path.home() / ".stride28-search-mcp"))
-_BROWSER_DATA = _DATA_HOME / "browser_data" / "xhs"
 _XHS_INDEX = "https://www.xiaohongshu.com/explore"
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -51,6 +48,12 @@ class CaptchaDetectedError(Exception):
         super().__init__(f"验证码拦截: {detail}")
 
 
+class SearchBlockedError(Exception):
+    """搜索被拦截或结果结构异常。"""
+    def __init__(self, detail: str = ""):
+        super().__init__(f"搜索被拦截: {detail}")
+
+
 class XhsBrowserSearcher:
     """纯浏览器小红书搜索器（使用 Chromium）"""
 
@@ -60,15 +63,16 @@ class XhsBrowserSearcher:
         self._context: Optional[BrowserContext] = None
         self._page: Optional[Page] = None
         self._initialized = False
+        self._browser_data_dir = get_browser_data_dir("xhs")
 
     async def _launch_context(self, headless: bool = True) -> BrowserContext:
         """启动 Chromium persistent context"""
         try:
-            _BROWSER_DATA.mkdir(parents=True, exist_ok=True)
+            self._browser_data_dir.mkdir(parents=True, exist_ok=True)
             self._pw_cm = async_playwright()
             self._playwright = await self._pw_cm.start()
             return await self._playwright.chromium.launch_persistent_context(
-                user_data_dir=str(_BROWSER_DATA),
+                user_data_dir=str(self._browser_data_dir),
                 headless=headless,
                 viewport={"width": 1920, "height": 1080},
                 user_agent=_UA,
@@ -93,6 +97,8 @@ class XhsBrowserSearcher:
 
     async def _is_logged_in(self) -> bool:
         """通过多层 Fallback 检测是否真正登录（web_session 游客也有）"""
+        if not self._page or not self._context:
+            return False
         method_used = None
         # 方法1: selfinfo API
         try:
@@ -138,14 +144,6 @@ class XhsBrowserSearcher:
                 method_used = "cookie_login_id"
                 logger.info("MCP: 登录检测通过 (method=%s)", method_used)
                 return True
-            # 备选：web_session 长度 > 50 通常是真正登录态
-            web_session = next(
-                (c.get("value", "") for c in cookies if c.get("name") == "web_session"), ""
-            )
-            if len(web_session) > 50:
-                method_used = "cookie_session_long"
-                logger.info("MCP: 登录检测通过 (method=%s)", method_used)
-                return True
         except Exception as e:
             logger.warning("MCP: Cookie 检测失败: %s", e)
 
@@ -153,10 +151,10 @@ class XhsBrowserSearcher:
         return False
 
     async def check_auth(self) -> bool:
-        if not _BROWSER_DATA.exists():
+        if not self._browser_data_dir.exists():
             return False
         try:
-            await self.init_browser(headless=True)
+            await self.init_browser(headless=get_non_login_headless())
             await self._page.goto(_XHS_INDEX, wait_until="domcontentloaded", timeout=30000)
             await self._page.wait_for_timeout(2000)
             logged_in = await self._is_logged_in()
@@ -176,9 +174,18 @@ class XhsBrowserSearcher:
         except Exception:
             return False
 
+    async def _raise_for_empty_results(self, query: str) -> None:
+        if not await self._is_logged_in():
+            raise LoginRequiredError("xiaohongshu")
+        if await self._check_captcha():
+            raise CaptchaDetectedError("搜索结果为空且检测到验证码")
+        raise SearchBlockedError(
+            f"搜索结果为空，可能是无头拦截、风控或需要重新登录 (query='{query}')"
+        )
+
     async def search(self, query: str, limit: int = 10, note_type: str = "all") -> SearchData:
         if not self._initialized:
-            await self.init_browser(headless=True)
+            await self.init_browser(headless=get_non_login_headless())
 
         search_url = self._make_search_url(query, note_type)
         logger.info("MCP: 导航到搜索页: %s", search_url)
@@ -217,21 +224,18 @@ class XhsBrowserSearcher:
 
         if not raw_json:
             logger.warning("MCP: 搜索结果为空 (query='%s')", query)
-            if await self._check_captcha():
-                raise CaptchaDetectedError("搜索结果为空且检测到验证码")
-            return SearchData(total_requested=limit, total_returned=0)
+            await self._raise_for_empty_results(query)
 
         try:
             feeds = json.loads(raw_json)
         except json.JSONDecodeError as e:
             logger.error("MCP: feeds JSON 解析失败: %s", e)
-            return SearchData(total_requested=limit, total_returned=0)
+            raise SearchBlockedError("搜索结果结构解析失败，可能是页面结构变化或浏览器被拦截") from e
 
         items = self._parse_feeds(feeds, limit)
         if not items:
-            if await self._check_captcha():
-                raise CaptchaDetectedError("搜索结果为空且检测到验证码")
-            return SearchData(total_requested=limit, total_returned=0)
+            logger.warning("MCP: feeds 已加载但解析后为空 (query='%s')", query)
+            await self._raise_for_empty_results(query)
         logger.info("MCP: 搜索完成，返回 %d 条结果 (query='%s')", len(items), query)
         return SearchData(results=items, total_requested=limit, total_returned=len(items))
 
@@ -250,31 +254,17 @@ class XhsBrowserSearcher:
         max_polls = int(timeout / 5)
         for i in range(max_polls):
             await self._page.wait_for_timeout(5000)
-            cookies = await self._context.cookies()
-            cookie_dict = {c["name"]: c["value"] for c in cookies}
-            if not cookie_dict.get("web_session"):
-                if i % 6 == 0:
-                    logger.info("等待登录中... (%ds / %ds)", (i + 1) * 5, int(timeout))
-                continue
-            # web_session 存在，验证是否真正登录
-            # 参考 xpzouying/xiaohongshu-mcp: 检查登录后才出现的 DOM 元素
             try:
-                is_real_login = await self._page.evaluate("""() => {
-                    const el = document.querySelector('.main-container .user .link-wrapper .channel');
-                    return el !== null;
-                }""")
+                is_real_login = await self._is_logged_in()
             except Exception as e:
-                logger.warning("MCP: login DOM 检测异常: %s", e)
-                is_real_login = False
-            except Exception as e:
-                logger.warning("MCP: login selfinfo 检测异常: %s", e)
+                logger.warning("MCP: login 严格检测异常: %s", e)
                 is_real_login = False
             if is_real_login:
-                logger.info("MCP: selfinfo 验证通过，登录成功！")
+                logger.info("MCP: 严格登录验证通过，登录成功！")
                 logged_in = True
                 break
             if i % 6 == 0:
-                logger.info("web_session 存在但未真正登录，继续等待... (%ds / %ds)", (i + 1) * 5, int(timeout))
+                logger.info("等待登录中... (%ds / %ds)", (i + 1) * 5, int(timeout))
 
         if not logged_in:
             await self.close()
@@ -426,7 +416,7 @@ class XhsBrowserSearcher:
     async def get_note_detail(self, note_id: str, xsec_token: str = "", max_comments: int = 50) -> "NoteDetail":
         from stride28_search_mcp.models import NoteDetail, CommentItem
         if not self._initialized:
-            await self.init_browser(headless=True)
+            await self.init_browser(headless=get_non_login_headless())
 
         url = f"https://www.xiaohongshu.com/explore/{note_id}"
         if xsec_token:

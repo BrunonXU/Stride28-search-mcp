@@ -33,9 +33,20 @@ def test_error_code_has_captcha_detected():
     assert ErrorCode.CAPTCHA_DETECTED.value == "captcha_detected"
 
 
+def test_error_code_has_search_blocked():
+    """ErrorCode enum should contain SEARCH_BLOCKED."""
+    assert hasattr(ErrorCode, "SEARCH_BLOCKED")
+    assert ErrorCode.SEARCH_BLOCKED.value == "search_blocked"
+
+
 def test_retryable_map_captcha_detected_false():
     """CAPTCHA_DETECTED should be retryable=false."""
     assert _RETRYABLE_MAP[ErrorCode.CAPTCHA_DETECTED] is False
+
+
+def test_retryable_map_search_blocked_false():
+    """SEARCH_BLOCKED should be retryable=false."""
+    assert _RETRYABLE_MAP[ErrorCode.SEARCH_BLOCKED] is False
 
 
 def test_retryable_map_browser_crashed_false():

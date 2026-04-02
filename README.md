@@ -96,6 +96,42 @@ stride28-search-mcp install-browser
 }
 ```
 
+建议为不同客户端显式设置不同的 `STRIDE28_SEARCH_MCP_PROFILE`，不要共用默认 profile。否则 Kiro、Work Buddy、本地手测会复用同一份 Chromium 持久化目录，导致“没扫码却像是已经登录”的假象。
+
+Kiro 示例：
+
+```json
+{
+  "mcpServers": {
+    "stride28-search": {
+      "command": "uvx",
+      "args": ["stride28-search-mcp"],
+      "env": {
+        "STRIDE28_SEARCH_MCP_PROFILE": "kiro"
+      },
+      "disabled": false
+    }
+  }
+}
+```
+
+Work Buddy 示例：
+
+```json
+{
+  "mcpServers": {
+    "stride28-search": {
+      "command": "uvx",
+      "args": ["stride28-search-mcp"],
+      "env": {
+        "STRIDE28_SEARCH_MCP_PROFILE": "workbuddy"
+      },
+      "disabled": false
+    }
+  }
+}
+```
+
 <details>
 <summary>用 uvx 免安装运行</summary>
 
@@ -124,8 +160,10 @@ stride28-search-mcp install-browser
 | `search_xiaohongshu` | 小红书 | 关键词搜索，支持图文/视频过滤 |
 | `get_note_detail` | 小红书 | 笔记详情 + 评论翻页 + 发布时间 |
 | `login_zhihu` | 知乎 | 手动登录 |
+| `reset_xiaohongshu_login` | 小红书 | 清空当前 profile 的登录态 |
 | `search_zhihu` | 知乎 | 关键词搜索（问答/专栏/视频） |
 | `get_zhihu_question` | 知乎 | Top N 回答，内容长度可配置 |
+| `reset_zhihu_login` | 知乎 | 清空当前 profile 的登录态 |
 
 ### search_xiaohongshu
 
@@ -163,6 +201,7 @@ stride28-search-mcp install-browser
 | `login_required` | 未登录 | ✗ | 调用 login tool |
 | `login_timeout` | 登录超时 | ✓ | 重新登录 |
 | `search_timeout` | 搜索超时 | ✓ | 稍后重试 |
+| `search_blocked` | 搜索结果异常为空 | ✗ | 检查无头模式、风控或重新登录 |
 | `browser_init_failed` | 浏览器启动失败 | ✗ | `stride28-search-mcp install-browser` |
 | `browser_crashed` | 浏览器崩溃 | ✗ | 重启 MCP Server |
 | `captcha_detected` | 验证码拦截 | ✗ | 等待后重试 |
@@ -176,9 +215,41 @@ stride28-search-mcp install-browser
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `STRIDE28_SEARCH_MCP_HOME` | `~/.stride28-search-mcp` | 数据目录 |
+| `STRIDE28_SEARCH_MCP_PROFILE` | `""` | 浏览器 profile 名；为空时走兼容模式，共享默认目录，不推荐 |
+| `STRIDE28_SEARCH_MCP_HEADLESS` | `true` | 非登录场景是否无头运行；疑难环境可设为 `false` 排查 |
 | `STRIDE28_RATE_LIMIT_SECONDS` | `2.0` | 请求最小间隔（秒） |
 
 </details>
+
+## 首次测试建议
+
+先确认环境：
+
+```bash
+stride28-search-mcp doctor
+```
+
+如果你要回到“新用户第一次安装”的状态：
+
+```bash
+stride28-search-mcp clear-state xhs
+stride28-search-mcp clear-state zhihu
+```
+
+或一次清空全部：
+
+```bash
+stride28-search-mcp clear-state all
+```
+
+推荐测试顺序：
+
+1. 为当前客户端设置独立 `STRIDE28_SEARCH_MCP_PROFILE`
+2. 运行 `stride28-search-mcp doctor`，确认 profile、浏览器目录、cookie 库路径正确
+3. 先调用 `login_xiaohongshu`，不扫码时不应返回成功
+4. 再调用 `search_xiaohongshu`，未登录时必须返回 `login_required`
+5. 完成登录后再次搜索，若仍空结果会明确返回 `search_blocked` 或 `captcha_detected`
+6. 知乎同理，先 `login_zhihu` 再 `search_zhihu`
 
 ## 开发
 

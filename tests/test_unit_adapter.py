@@ -5,7 +5,11 @@ Validates: Requirements 1.1, 1.2, 4.2, 4.3, 4.4, 10.1
 """
 from __future__ import annotations
 
-from stride28_search_mcp.adapter import CaptchaDetectedError, XhsBrowserSearcher
+from stride28_search_mcp.adapter import (
+    CaptchaDetectedError,
+    SearchBlockedError,
+    XhsBrowserSearcher,
+)
 
 
 def _make_feed(title: str = "test", note_id: str = "123") -> dict:
@@ -84,3 +88,9 @@ def test_captcha_detected_error_message():
     """CaptchaDetectedError message should contain detail."""
     err = CaptchaDetectedError("test detail")
     assert "test detail" in str(err)
+
+
+def test_search_blocked_error_message():
+    """SearchBlockedError message should contain detail."""
+    err = SearchBlockedError("blocked detail")
+    assert "blocked detail" in str(err)

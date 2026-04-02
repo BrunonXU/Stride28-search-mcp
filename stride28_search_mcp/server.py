@@ -30,6 +30,16 @@ from stride28_search_mcp.adapter import (
     BrowserLaunchError,
     CaptchaDetectedError,
     LoginRequiredError,
+    SearchBlockedError,
+)
+from stride28_search_mcp.state import (
+    clear_browser_data,
+    find_cookie_store,
+    get_browser_data_dir,
+    get_data_home,
+    get_non_login_headless,
+    get_profile_mode,
+    get_profile_name,
 )
 
 # ============================================================
@@ -49,26 +59,81 @@ def _browser_init_message(exc: Exception) -> str:
     return f"{base} 原始错误: {detail}" if detail else base
 
 
+def _profile_display_name() -> str:
+    return get_profile_name() or "shared-default"
+
+
+def _clear_state_targets(target: str) -> list[tuple[str, str]]:
+    normalized = target.strip().lower()
+    if normalized in {"xhs", "xiaohongshu"}:
+        return [("xiaohongshu", "xhs")]
+    if normalized == "zhihu":
+        return [("zhihu", "zhihu")]
+    if normalized == "all":
+        return [("xiaohongshu", "xhs"), ("zhihu", "zhihu")]
+    raise ValueError("clear-state 仅支持 xhs | zhihu | all")
+
+
+async def _clear_state(target: str) -> dict:
+    cleared = []
+    for platform, storage_platform in _clear_state_targets(target):
+        await lifecycle.destroy_searcher(platform)
+        cleared_path = clear_browser_data(storage_platform)
+        cleared.append(
+            {
+                "platform": platform,
+                "profile": _profile_display_name(),
+                "path": str(cleared_path),
+            }
+        )
+    return {
+        "target": target,
+        "profile": _profile_display_name(),
+        "cleared": cleared,
+    }
+
+
+def _run_clear_state(target: str) -> int:
+    import json
+
+    try:
+        result = asyncio.run(_clear_state(target))
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
 def _run_doctor() -> int:
     import importlib
     import importlib.metadata
     import json
-    import os
-    import tomllib
     from pathlib import Path
 
-    data_home = Path(os.getenv("STRIDE28_SEARCH_MCP_HOME", Path.home() / ".stride28-search-mcp"))
+    data_home = get_data_home()
     try:
         version = importlib.metadata.version("stride28-search-mcp")
     except importlib.metadata.PackageNotFoundError:
         pyproject_path = Path(__file__).resolve().parent.parent / "pyproject.toml"
-        with pyproject_path.open("rb") as fh:
-            version = tomllib.load(fh)["project"]["version"]
+        version = "unknown"
+        try:
+            with pyproject_path.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    stripped = line.strip()
+                    if stripped.startswith("version ="):
+                        version = stripped.split("=", 1)[1].strip().strip('"')
+                        break
+        except Exception:
+            pass
     report = {
         "package": "stride28-search-mcp",
         "version": version,
         "python": sys.version.split()[0],
         "data_home": str(data_home),
+        "profile": _profile_display_name(),
+        "profile_mode": get_profile_mode(),
+        "non_login_headless": get_non_login_headless(),
         "checks": {},
     }
 
@@ -112,13 +177,28 @@ def _run_doctor() -> int:
     except Exception as exc:
         report["checks"]["chromium_installed"] = {"ok": False, "detail": str(exc)}
 
-    report["checks"]["xhs_cookie_dir"] = {
+    xhs_browser_data_dir = get_browser_data_dir("xhs")
+    zhihu_browser_data_dir = get_browser_data_dir("zhihu")
+    xhs_cookie_store = find_cookie_store("xhs")
+    zhihu_cookie_store = find_cookie_store("zhihu")
+
+    report["checks"]["xhs_browser_data_dir"] = {
         "ok": True,
-        "detail": str(data_home / "browser_data" / "xhs"),
+        "detail": str(xhs_browser_data_dir),
     }
-    report["checks"]["zhihu_cookie_dir"] = {
+    report["checks"]["xhs_cookie_store"] = {
+        "ok": xhs_cookie_store is not None,
+        "detail": str(xhs_cookie_store or (xhs_browser_data_dir / "Default" / "Network" / "Cookies")),
+    }
+    report["checks"]["zhihu_browser_data_dir"] = {
         "ok": True,
-        "detail": str(data_home / "browser_data" / "zhihu"),
+        "detail": str(zhihu_browser_data_dir),
+    }
+    report["checks"]["zhihu_cookie_store"] = {
+        "ok": zhihu_cookie_store is not None,
+        "detail": str(
+            zhihu_cookie_store or (zhihu_browser_data_dir / "Default" / "Network" / "Cookies")
+        ),
     }
 
     print(json.dumps(report, ensure_ascii=False, indent=2))
@@ -209,6 +289,10 @@ async def search_xiaohongshu(query: str, limit: int = 10, note_type: str = "all"
                 platform, tool_name, ErrorCode.CAPTCHA_DETECTED,
                 "搜索结果为空且检测到验证码拦截，请稍后重试或手动处理验证码",
             )
+        except SearchBlockedError as e:
+            return EnvelopeBuilder.error(
+                platform, tool_name, ErrorCode.SEARCH_BLOCKED, str(e),
+            )
         except LoginRequiredError:
             return EnvelopeBuilder.error(
                 platform, tool_name, ErrorCode.LOGIN_REQUIRED,
@@ -278,6 +362,22 @@ async def get_note_detail(note_id: str, xsec_token: str = "", max_comments: int 
 
 
 # ============================================================
+# Tool: 重置小红书登录态
+# ============================================================
+
+@mcp.tool(
+    name="reset_xiaohongshu_login",
+    description="清空当前 profile 下的小红书浏览器状态目录，用于重新走首次登录流程。",
+)
+async def reset_xiaohongshu_login() -> str:
+    platform, tool_name = "xiaohongshu", "reset_xiaohongshu_login"
+    lock = lifecycle.get_lock(platform)
+    async with lock:
+        data = await _clear_state("xhs")
+        return EnvelopeBuilder.success(platform, tool_name, data)
+
+
+# ============================================================
 # Tool: 搜索知乎
 # ============================================================
 
@@ -300,7 +400,11 @@ async def search_zhihu(query: str, limit: int = 10) -> str:
     async with lock:
         try:
             searcher = await lifecycle.get_searcher(platform)
-            await searcher.check_auth()
+            if not await searcher.check_auth():
+                return EnvelopeBuilder.error(
+                    platform, tool_name, ErrorCode.LOGIN_REQUIRED,
+                    "知乎当前需要登录后才能搜索，请先调用 login_zhihu 工具完成登录",
+                )
             search_data = await asyncio.wait_for(
                 searcher.search(query, limit), timeout=30,
             )
@@ -345,7 +449,11 @@ async def get_zhihu_question(question_id: str, limit: int = 5, max_content_lengt
     async with lock:
         try:
             searcher = await lifecycle.get_searcher(platform)
-            await searcher.check_auth()
+            if not await searcher.check_auth():
+                return EnvelopeBuilder.error(
+                    platform, tool_name, ErrorCode.LOGIN_REQUIRED,
+                    "知乎当前需要登录后才能获取问题回答，请先调用 login_zhihu 工具完成登录",
+                )
             data = await asyncio.wait_for(
                 searcher.get_question_answers(question_id, limit, max_content_length), timeout=30,
             )
@@ -410,6 +518,22 @@ async def login_zhihu() -> str:
 
 
 # ============================================================
+# Tool: 重置知乎登录态
+# ============================================================
+
+@mcp.tool(
+    name="reset_zhihu_login",
+    description="清空当前 profile 下的知乎浏览器状态目录，用于重新走首次登录流程。",
+)
+async def reset_zhihu_login() -> str:
+    platform, tool_name = "zhihu", "reset_zhihu_login"
+    lock = lifecycle.get_lock(platform)
+    async with lock:
+        data = await _clear_state("zhihu")
+        return EnvelopeBuilder.success(platform, tool_name, data)
+
+
+# ============================================================
 # 优雅退出
 # ============================================================
 
@@ -444,8 +568,11 @@ def main():
             raise SystemExit(subprocess.call([sys.executable, "-m", "playwright", "install", "chromium"]))
         if sys.argv[1] == "doctor":
             raise SystemExit(_run_doctor())
+        if sys.argv[1] == "clear-state":
+            target = sys.argv[2] if len(sys.argv) > 2 else "all"
+            raise SystemExit(_run_clear_state(target))
         if sys.argv[1] in {"-h", "--help", "help"}:
-            print("Usage: stride28-search-mcp [install-browser|doctor]")
+            print("Usage: stride28-search-mcp [install-browser|doctor|clear-state [xhs|zhihu|all]]")
             raise SystemExit(0)
     sys.stdout = _original_stdout
     mcp.run(transport="stdio")

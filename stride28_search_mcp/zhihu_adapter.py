@@ -9,9 +9,7 @@ import asyncio
 import html
 import json
 import logging
-import os
 import re
-from pathlib import Path
 from typing import Dict, List, Optional
 from urllib.parse import quote
 
@@ -25,11 +23,10 @@ except ImportError:
 
 from stride28_search_mcp.adapter import BrowserLaunchError, LoginRequiredError
 from stride28_search_mcp.models import SearchResultItem, SearchData
+from stride28_search_mcp.state import get_browser_data_dir, get_non_login_headless
 
 logger = logging.getLogger(__name__)
 
-_DATA_HOME = Path(os.getenv("STRIDE28_SEARCH_MCP_HOME", Path.home() / ".stride28-search-mcp"))
-_BROWSER_DATA = _DATA_HOME / "browser_data" / "zhihu"
 _ZHIHU_URL = "https://www.zhihu.com"
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -57,17 +54,18 @@ class ZhihuBrowserSearcher:
         self._context: Optional[BrowserContext] = None
         self._page: Optional[Page] = None
         self._initialized = False
+        self._browser_data_dir = get_browser_data_dir("zhihu")
 
     async def init_browser(self, headless: bool = True):
         if self._initialized:
             return
         logger.info("MCP: 初始化知乎浏览器 (headless=%s)...", headless)
         try:
-            _BROWSER_DATA.mkdir(parents=True, exist_ok=True)
+            self._browser_data_dir.mkdir(parents=True, exist_ok=True)
             self._pw_cm = async_playwright()
             self._playwright = await self._pw_cm.start()
             self._context = await self._playwright.chromium.launch_persistent_context(
-                user_data_dir=str(_BROWSER_DATA),
+                user_data_dir=str(self._browser_data_dir),
                 headless=headless,
                 viewport={"width": 1920, "height": 1080},
                 user_agent=_UA,
@@ -87,22 +85,26 @@ class ZhihuBrowserSearcher:
             raise BrowserLaunchError(str(exc)) from exc
 
     async def check_auth(self) -> bool:
+        if not self._browser_data_dir.exists():
+            return False
         try:
-            await self.init_browser(headless=True)
-            return True
+            await self.init_browser(headless=get_non_login_headless())
+            logged_in = await self._is_logged_in()
+            logger.info("MCP: zhihu check_auth 已登录=%s", logged_in)
+            return logged_in
         except Exception as e:
             logger.warning("MCP: 知乎浏览器初始化失败: %s", e)
             raise BrowserLaunchError(str(e)) from e
 
     async def _is_logged_in(self) -> bool:
         if not self._initialized:
-            await self.init_browser(headless=True)
+            await self.init_browser(headless=get_non_login_headless())
         cookies = await self._context.cookies()
         return any(cookie.get("name") == "z_c0" and cookie.get("value") for cookie in cookies)
 
     async def search(self, query: str, limit: int = 10) -> SearchData:
         if not self._initialized:
-            await self.init_browser(headless=True)
+            await self.init_browser(headless=get_non_login_headless())
 
         captured: List[dict] = []
         login_required = False
@@ -160,7 +162,7 @@ class ZhihuBrowserSearcher:
     async def get_question_answers(self, question_id: str, limit: int = 5,
                                     max_content_length: int = 10000) -> dict:
         if not self._initialized:
-            await self.init_browser(headless=True)
+            await self.init_browser(headless=get_non_login_headless())
         if not await self._is_logged_in():
             raise LoginRequiredError("zhihu")
 
@@ -247,11 +249,11 @@ class ZhihuBrowserSearcher:
     async def login(self, timeout: float = 300):
         await self.close()
         logger.info("MCP: 弹出知乎登录窗口...")
-        _BROWSER_DATA.mkdir(parents=True, exist_ok=True)
+        self._browser_data_dir.mkdir(parents=True, exist_ok=True)
         self._pw_cm = async_playwright()
         self._playwright = await self._pw_cm.start()
         self._context = await self._playwright.chromium.launch_persistent_context(
-            user_data_dir=str(_BROWSER_DATA),
+            user_data_dir=str(self._browser_data_dir),
             headless=False,
             viewport={"width": 1920, "height": 1080},
             user_agent=_UA,

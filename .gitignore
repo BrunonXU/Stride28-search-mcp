@@ -7,6 +7,7 @@ dist/
 
 # 虚拟环境
 .venv*/
+.pytest-env/
 .test-venv/
 .test-site/
 venv/
@@ -14,12 +15,14 @@ venv/
 # 浏览器数据（含登录态，不要提交）
 browser_data/
 .mcp-data/
+.mcp-smoke*/
 
 # IDE / 工具
 .env
 *.log
 .hypothesis/
 .pytest_cache/
+pytest-cache-files-*/
 
 # 杂项
 scripts/

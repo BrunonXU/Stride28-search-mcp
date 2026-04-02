@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "stride28-search-mcp"
-version = "0.1.6"
+version = "0.1.7"
 description = "小红书 + 知乎搜索 MCP Server（纯浏览器方案）"
 readme = "README.md"
 license = "MIT"
@@ -30,3 +30,14 @@ stride28-search-mcp = "stride28_search_mcp.server:main"
 [project.urls]
 Homepage = "https://github.com/BrunonXU/Stride28-search-mcp"
 Repository = "https://github.com/BrunonXU/Stride28-search-mcp"
+
+[tool.pytest.ini_options]
+norecursedirs = [
+    ".hypothesis",
+    ".pytest-env",
+    ".pytest_cache",
+    ".test-site",
+    ".venv*",
+    ".mcp-smoke*",
+    "pytest-cache-files-*",
+]
