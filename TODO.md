@@ -7,6 +7,20 @@
 - R6/R10 captcha 检测：mock `_page.query_selector` 返回 captcha 元素 → 验证抛 CaptchaDetectedError
 - R9 评论硬停止：mock `_extract_comments_from_dom` 模拟连续空加载 / selector 失效 / 超时
 
+## BUG: uvx 环境下搜索返回空结果（高优先级）
+
+现象：通过 `uvx stride28-search-mcp` 运行时，login 成功但 search 一直返回空结果（total_returned=0）。
+本地源码版本（指向 venv312）正常。
+
+疑似原因：`uvx` 安装的 Playwright 使用 `chrome-headless-shell` 而非完整 Chromium，
+小红书可能检测到 headless shell 后不返回 `__INITIAL_STATE__` 数据。
+
+排查方向：
+- 对比 uvx 和本地 venv 的 Playwright 浏览器类型（headless shell vs full chromium）
+- 检查 `__INITIAL_STATE__` 在 headless shell 下是否为空
+- 考虑在 adapter.py 中强制使用完整 Chromium 而非 headless shell
+- 这也是 WorkBuddy 上搜索返回空结果的根因
+
 ## P1 改进（下一阶段）
 
 - adapter 内部分层（导航层 / 提取层 / 转换层）

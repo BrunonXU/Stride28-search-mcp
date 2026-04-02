@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "stride28-search-mcp"
-version = "0.1.5"
+version = "0.1.6"
 description = "小红书 + 知乎搜索 MCP Server（纯浏览器方案）"
 readme = "README.md"
 license = "MIT"

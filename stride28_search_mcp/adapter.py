@@ -113,27 +113,37 @@ class XhsBrowserSearcher:
         except Exception as e:
             logger.warning("MCP: selfinfo API 检测失败: %s", e)
 
-        # 方法2: DOM 元素检测
+        # 方法2: DOM 元素检测（参考 xpzouying/xiaohongshu-mcp）
         try:
-            avatar = await self._page.query_selector(
-                '.user-avatar, .side-bar .avatar-wrapper, [class*="avatar"]'
+            user_channel = await self._page.query_selector(
+                '.main-container .user .link-wrapper .channel'
             )
-            if avatar:
-                method_used = "dom_avatar"
+            if user_channel:
+                method_used = "dom_user_channel"
                 logger.info("MCP: 登录检测通过 (method=%s)", method_used)
                 return True
         except Exception as e:
             logger.warning("MCP: DOM 元素检测失败: %s", e)
 
-        # 方法3: Cookie 检测
+        # 方法3: Cookie 检测（排除游客 web_session）
         try:
             cookies = await self._context.cookies()
-            has_session = any(
-                c.get("name") == "web_session" and c.get("value")
+            # 游客也有 web_session，需要检查更可靠的登录标识
+            has_login_cookie = any(
+                c.get("name") in ("galaxy_creator_session_id", "customer-sso-sid")
+                and c.get("value")
                 for c in cookies
             )
-            if has_session:
-                method_used = "cookie_session"
+            if has_login_cookie:
+                method_used = "cookie_login_id"
+                logger.info("MCP: 登录检测通过 (method=%s)", method_used)
+                return True
+            # 备选：web_session 长度 > 50 通常是真正登录态
+            web_session = next(
+                (c.get("value", "") for c in cookies if c.get("name") == "web_session"), ""
+            )
+            if len(web_session) > 50:
+                method_used = "cookie_session_long"
                 logger.info("MCP: 登录检测通过 (method=%s)", method_used)
                 return True
         except Exception as e:
@@ -246,8 +256,20 @@ class XhsBrowserSearcher:
                 if i % 6 == 0:
                     logger.info("等待登录中... (%ds / %ds)", (i + 1) * 5, int(timeout))
                 continue
-            # web_session 存在，用 selfinfo 验证是否真正登录
-            if await self._is_logged_in():
+            # web_session 存在，验证是否真正登录
+            # 参考 xpzouying/xiaohongshu-mcp: 检查登录后才出现的 DOM 元素
+            try:
+                is_real_login = await self._page.evaluate("""() => {
+                    const el = document.querySelector('.main-container .user .link-wrapper .channel');
+                    return el !== null;
+                }""")
+            except Exception as e:
+                logger.warning("MCP: login DOM 检测异常: %s", e)
+                is_real_login = False
+            except Exception as e:
+                logger.warning("MCP: login selfinfo 检测异常: %s", e)
+                is_real_login = False
+            if is_real_login:
                 logger.info("MCP: selfinfo 验证通过，登录成功！")
                 logged_in = True
                 break
