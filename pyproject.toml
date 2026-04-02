@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "stride28-search-mcp"
-version = "0.1.1"
+version = "0.1.2"
 description = "小红书 + 知乎搜索 MCP Server（纯浏览器方案）"
 readme = "README.md"
 license = "MIT"
@@ -22,7 +22,7 @@ dependencies = [
     "mcp[cli]>=1.0.0",
     "playwright>=1.49.0",
     "pydantic>=2.0.0",
-    "playwright-stealth>=1.0.6",
+    "tf-playwright-stealth>=1.0.0",
 ]
 
 [project.scripts]
