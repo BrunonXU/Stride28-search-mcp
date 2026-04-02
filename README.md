@@ -28,6 +28,8 @@
 
 ## 演示
 
+### Kiro + MCP 搜索
+
 <p align="center">
   <img src="assets/kiro-ques1.png" width="700" alt="Kiro 搜索演示" />
 </p>
@@ -36,12 +38,16 @@
   <img src="assets/kiro-ques2.png" width="700" alt="Kiro 搜索演示" />
 </p>
 
-<!-- TODO: WorkBuddy + Claw 自动化演示
+### WorkBuddy + MCP 自动化（即将推出）
+
+> 一键爬取小红书/知乎内容 → 接入腾讯文档/飞书文档自动整理 → 配合 Claw 实现每日自动化拉取、分类归档、摘要生成。
+
+<!-- 替换为实际截图/GIF
 <p align="center">
-  <img src="assets/workbuddy-demo.gif" width="700" alt="WorkBuddy MCP + 一键爬取接入腾讯/飞书文档" />
+  <img src="assets/workbuddy-crawl.gif" width="700" alt="WorkBuddy 一键爬取 + 文档整理" />
 </p>
 <p align="center">
-  <img src="assets/auto-crawl-demo.gif" width="700" alt="配合 Claw 每日自动化拉取 + 整理" />
+  <img src="assets/claw-daily-auto.gif" width="700" alt="Claw 每日自动化拉取 + 归档" />
 </p>
 -->
 
@@ -109,7 +115,8 @@ stride28-search-mcp install-browser
 
 兼容：[Kiro](https://kiro.dev) · [Cursor](https://cursor.sh) · [Claude Code](https://docs.anthropic.com/en/docs/claude-code) · [VS Code + Copilot](https://code.visualstudio.com/) · 任何支持 MCP stdio transport 的客户端
 
-## 可用 Tool
+<details>
+<summary><strong>可用 Tool</strong></summary>
 
 | Tool | 平台 | 说明 |
 |------|------|------|
@@ -119,9 +126,6 @@ stride28-search-mcp install-browser
 | `login_zhihu` | 知乎 | 手动登录 |
 | `search_zhihu` | 知乎 | 关键词搜索（问答/专栏/视频） |
 | `get_zhihu_question` | 知乎 | Top N 回答，内容长度可配置 |
-
-<details>
-<summary>参数详情</summary>
 
 ### search_xiaohongshu
 
@@ -149,7 +153,8 @@ stride28-search-mcp install-browser
 
 </details>
 
-## 错误码
+<details>
+<summary><strong>错误码</strong></summary>
 
 所有错误返回统一 JSON，包含 `retryable` 字段供 agent 判断是否重试。
 
@@ -163,12 +168,17 @@ stride28-search-mcp install-browser
 | `captcha_detected` | 验证码拦截 | ✗ | 等待后重试 |
 | `unknown_error` | 未知错误 | ✗ | 查看日志 |
 
-## 环境变量
+</details>
+
+<details>
+<summary><strong>环境变量</strong></summary>
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `STRIDE28_SEARCH_MCP_HOME` | `~/.stride28-search-mcp` | 数据目录 |
 | `STRIDE28_RATE_LIMIT_SECONDS` | `2.0` | 请求最小间隔（秒） |
+
+</details>
 
 ## 开发
 
