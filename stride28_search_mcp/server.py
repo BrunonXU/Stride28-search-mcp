@@ -311,11 +311,6 @@ async def search_xiaohongshu(query: str, limit: int = 10, note_type: str = "all"
     async with lock:
         try:
             searcher = await lifecycle.get_searcher(platform)
-            if not await searcher.check_auth():
-                return EnvelopeBuilder.error(
-                    platform, tool_name, ErrorCode.LOGIN_REQUIRED,
-                    "小红书未登录或 Cookie 已失效，请先调用 login_xiaohongshu 工具完成登录",
-                )
             search_data = await asyncio.wait_for(
                 searcher.search(query, limit, note_type), timeout=60,
             )
@@ -367,9 +362,10 @@ async def search_xiaohongshu(query: str, limit: int = 10, note_type: str = "all"
         "获取小红书笔记的完整详情，包括正文、评论、图片、互动数据。"
         "需要提供 note_id 和 xsec_token（从搜索结果中获取）。"
         "需要先登录（login_xiaohongshu）。"
+        "默认仅返回较少评论；如需更深评论翻页，请显式提高 max_comments。"
     ),
 )
-async def get_note_detail(note_id: str, xsec_token: str = "", max_comments: int = 50) -> str:
+async def get_note_detail(note_id: str, xsec_token: str = "", max_comments: int = 10) -> str:
     platform, tool_name = "xiaohongshu", "get_note_detail"
     cooldown_error = _active_cooldown_envelope(platform, tool_name)
     if cooldown_error:
@@ -379,11 +375,6 @@ async def get_note_detail(note_id: str, xsec_token: str = "", max_comments: int 
     async with lock:
         try:
             searcher = await lifecycle.get_searcher(platform)
-            if not await searcher.check_auth():
-                return EnvelopeBuilder.error(
-                    platform, tool_name, ErrorCode.LOGIN_REQUIRED,
-                    "小红书未登录，请先调用 login_xiaohongshu",
-                )
             detail = await asyncio.wait_for(
                 searcher.get_note_detail(note_id, xsec_token, max_comments), timeout=30,
             )

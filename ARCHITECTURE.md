@@ -69,8 +69,8 @@ models.py / EnvelopeBuilder
 3. 若处于冷却期，直接返回 `risk_cooldown_active`
 4. 调用 `RateLimiter.acquire("xiaohongshu", "search_xiaohongshu")`
 5. `LifecycleManager.get_searcher("xiaohongshu")`
-6. `check_auth()` 使用严格认证结果判断是否已登录
-7. `search(query, limit, note_type)` 导航搜索页并读取 `__INITIAL_STATE__.search.feeds`
+6. 直接导航到真实搜索页，不再先跳 `/explore` 做页面级认证预检
+7. `search(query, limit, note_type)` 在真实搜索页上判断认证并读取 `__INITIAL_STATE__.search.feeds`
 8. `_parse_feeds()` 过滤空标题并构造 `SearchResultItem`
 9. 若结果为空：
    - 未登录 → `login_required`
@@ -83,10 +83,10 @@ models.py / EnvelopeBuilder
 1. `server.py` 收到 `get_note_detail`
 2. 先检查小红书风控冷却
 3. 统一限流
-4. `check_auth()` 严格校验登录
-5. 导航到笔记页并读取 `__INITIAL_STATE__.note.noteDetailMap`
+4. 直接导航到真实笔记页，不再先跳认证页
+5. 在真实笔记页上判断认证并读取 `__INITIAL_STATE__.note.noteDetailMap`
 6. 先提取首屏评论
-7. 不足时 `_load_more_comments()` 继续加载
+7. 默认 `max_comments=10`，优先返回较少评论；只有显式请求更大值时才继续翻页
 8. 评论加载命中硬停止条件即返回已获得评论
 
 ### 知乎搜索
@@ -127,10 +127,13 @@ models.py / EnvelopeBuilder
 - `reason`
 - `login_cookie_names`
 
-当前只接受两类强信号：
+当前按三层顺序判断：
 
 - `selfinfo` 返回可解析且明确成功
 - 命中白名单登录 cookie：`customer-sso-sid` / `galaxy_creator_session_id`
+- 精确 DOM fallback：`.main-container .user .link-wrapper .channel`
+
+这里的 DOM fallback 只保留为保守兜底，用的是登录后页面中的精确 selector，不再使用宽泛 avatar 类选择器。
 
 ### 风控冷却
 
@@ -139,7 +142,7 @@ models.py / EnvelopeBuilder
 - `captcha_detected`
 - `search_blocked`
 
-默认冷却 15 分钟，可通过 `STRIDE28_XHS_RISK_COOLDOWN_SECONDS` 调整。冷却期间：
+默认冷却 15 分钟，可通过 `STRIDE28_XHS_RISK_COOLDOWN_SECONDS` 调整。冷却状态会持久化到当前 profile 的运行时状态目录。冷却期间：
 
 - `search_xiaohongshu`
 - `get_note_detail`

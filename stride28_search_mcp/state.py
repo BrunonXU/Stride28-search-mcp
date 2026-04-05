@@ -46,6 +46,20 @@ def get_browser_data_dir(platform: str) -> Path:
     return browser_root / platform
 
 
+def get_runtime_state_dir() -> Path:
+    runtime_root = get_data_home() / "runtime_state"
+    profile = get_profile_name()
+    if profile:
+        return runtime_root / "profiles" / profile
+    return runtime_root / "shared_default"
+
+
+def get_risk_cooldown_path(platform: str) -> Path:
+    if platform not in {"xhs", "zhihu"}:
+        raise ValueError(f"unsupported platform: {platform}")
+    return get_runtime_state_dir() / f"{platform}_risk_cooldown.json"
+
+
 def _parse_headless(raw: str | None, default: bool) -> bool:
     if raw is None or not raw.strip():
         return default

@@ -123,10 +123,6 @@ class XhsBrowserSearcher:
             logger.warning("MCP: 读取 Cookie 失败: %s", exc)
             return []
 
-        # 调试：打印所有 cookie 名称
-        all_names = sorted({c.get("name", "") for c in cookies if c.get("name")})
-        logger.info("MCP: 当前所有 cookie 名称: %s", all_names)
-
         return sorted(
             {
                 cookie.get("name", "")
@@ -271,9 +267,18 @@ class XhsBrowserSearcher:
             return False
         try:
             await self.init_browser(headless=get_platform_headless("xhs"))
-            await self._page.goto(_XHS_INDEX, wait_until="domcontentloaded", timeout=30000)
-            await self._page.wait_for_timeout(2000)
-            auth_result = await self._get_auth_result(force_refresh=True)
+            self._last_auth_result = None
+            if self._page and self._page.url.startswith("https://www.xiaohongshu.com"):
+                auth_result = await self._get_auth_result(force_refresh=True)
+            else:
+                login_cookie_names = await self._get_login_cookie_names()
+                auth_result = XhsAuthResult(
+                    logged_in=bool(login_cookie_names),
+                    source="login_cookie" if login_cookie_names else "none",
+                    reason="lightweight_cookie_check",
+                    login_cookie_names=login_cookie_names,
+                )
+                self._last_auth_result = auth_result
             logger.info(
                 "MCP: check_auth 已登录=%s source=%s reason=%s",
                 auth_result.logged_in,
@@ -300,7 +305,7 @@ class XhsBrowserSearcher:
         query: str,
         auth_result: Optional[XhsAuthResult] = None,
     ) -> None:
-        auth_result = auth_result or await self._get_auth_result()
+        auth_result = auth_result or await self._get_auth_result(force_refresh=True)
         if not auth_result.logged_in:
             raise LoginRequiredError("xiaohongshu")
         if await self._check_captcha():
@@ -309,12 +314,27 @@ class XhsBrowserSearcher:
             f"搜索结果为空，可能是无头拦截、风控或需要重新登录 (query='{query}')"
         )
 
+    async def _raise_for_missing_note_detail(
+        self,
+        note_id: str,
+        auth_result: Optional[XhsAuthResult] = None,
+    ) -> None:
+        auth_result = auth_result or await self._get_auth_result(force_refresh=True)
+        if not auth_result.logged_in:
+            raise LoginRequiredError("xiaohongshu")
+        if await self._check_captcha():
+            raise CaptchaDetectedError("笔记详情为空且检测到验证码")
+        raise SearchBlockedError(
+            f"笔记详情为空，可能是风控、页面结构变化或需要重新登录 (note_id='{note_id}')"
+        )
+
     async def search(self, query: str, limit: int = 10, note_type: str = "all") -> SearchData:
         if not self._initialized:
             await self.init_browser(headless=get_platform_headless("xhs"))
 
         search_url = self._make_search_url(query, note_type)
         logger.info("MCP: 导航到搜索页: %s", search_url)
+        self._last_auth_result = None
         await self._page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
 
         try:
@@ -350,7 +370,10 @@ class XhsBrowserSearcher:
 
         if not raw_json:
             logger.warning("MCP: 搜索结果为空 (query='%s')", query)
-            await self._raise_for_empty_results(query, auth_result=await self._get_auth_result())
+            await self._raise_for_empty_results(
+                query,
+                auth_result=await self._get_auth_result(force_refresh=True),
+            )
 
         try:
             feeds = json.loads(raw_json)
@@ -361,7 +384,10 @@ class XhsBrowserSearcher:
         items = self._parse_feeds(feeds, limit)
         if not items:
             logger.warning("MCP: feeds 已加载但解析后为空 (query='%s')", query)
-            await self._raise_for_empty_results(query, auth_result=await self._get_auth_result())
+            await self._raise_for_empty_results(
+                query,
+                auth_result=await self._get_auth_result(force_refresh=True),
+            )
         logger.info("MCP: 搜索完成，返回 %d 条结果 (query='%s')", len(items), query)
         return SearchData(results=items, total_requested=limit, total_returned=len(items))
 
@@ -541,7 +567,7 @@ class XhsBrowserSearcher:
             logger.warning("MCP: 评论加载硬停止 - %s, 已加载 %d 条", stop_reason, len(comments))
         return comments[:max_comments]
 
-    async def get_note_detail(self, note_id: str, xsec_token: str = "", max_comments: int = 50) -> "NoteDetail":
+    async def get_note_detail(self, note_id: str, xsec_token: str = "", max_comments: int = 10) -> "NoteDetail":
         from stride28_search_mcp.models import NoteDetail, CommentItem
         if not self._initialized:
             await self.init_browser(headless=get_platform_headless("xhs"))
@@ -551,6 +577,7 @@ class XhsBrowserSearcher:
             url += f"?xsec_token={xsec_token}&xsec_source=pc_search"
 
         logger.info("MCP: 导航到笔记详情: %s", url)
+        self._last_auth_result = None
         await self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
         try:
             await self._page.wait_for_load_state("networkidle", timeout=15000)
@@ -580,12 +607,15 @@ class XhsBrowserSearcher:
             } catch(e) { return ""; }
         }""", note_id)
 
+        auth_result = await self._get_auth_result(force_refresh=True)
         if not raw_json:
-            return NoteDetail(id=note_id, url=url)
+            await self._raise_for_missing_note_detail(note_id, auth_result=auth_result)
         try:
             detail = json.loads(raw_json)
         except json.JSONDecodeError:
-            return NoteDetail(id=note_id, url=url)
+            raise SearchBlockedError(
+                f"笔记详情结构解析失败，可能是页面结构变化或被拦截 (note_id='{note_id}')"
+            )
 
         data = detail.get("note") or detail
         title = data.get("title") or ""
@@ -630,7 +660,7 @@ class XhsBrowserSearcher:
             logger.warning("MCP: 评论提取失败: %s", e)
 
         # 如果首屏评论不够，尝试翻页加载更多
-        if len(comments) < max_comments:
+        if max_comments > 10 and len(comments) < max_comments:
             try:
                 more_comments = await self._load_more_comments(
                     max_comments=max_comments,

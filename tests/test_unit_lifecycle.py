@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import shutil
+from pathlib import Path
 
 import stride28_search_mcp.lifecycle as lifecycle_module
 from stride28_search_mcp.lifecycle import LifecycleManager, RateLimiter
@@ -36,10 +39,14 @@ def test_rate_limiter_skips_login_tools(monkeypatch):
 
 
 def test_risk_cooldown_activates_and_expires(monkeypatch):
+    test_home = Path(".pytest-env-risk-activate")
+    if test_home.exists():
+        shutil.rmtree(test_home)
     monkeypatch.setenv("STRIDE28_XHS_RISK_COOLDOWN_SECONDS", "15")
+    monkeypatch.setenv("STRIDE28_SEARCH_MCP_HOME", str(test_home.resolve()))
     current = {"value": 100.0}
 
-    monkeypatch.setattr(lifecycle_module.time, "monotonic", lambda: current["value"])
+    monkeypatch.setattr(lifecycle_module.time, "time", lambda: current["value"])
 
     manager = LifecycleManager()
     manager.activate_risk_cooldown("xiaohongshu", "captcha_detected")
@@ -53,4 +60,31 @@ def test_risk_cooldown_activates_and_expires(monkeypatch):
     expired = manager.get_risk_cooldown("xiaohongshu")
     assert expired["active"] is False
     assert expired["remaining_seconds"] == 0
+    if test_home.exists():
+        shutil.rmtree(test_home)
 
+
+def test_risk_cooldown_persists_to_disk(monkeypatch):
+    test_home = Path(".pytest-env-risk-persist")
+    if test_home.exists():
+        shutil.rmtree(test_home)
+    monkeypatch.setenv("STRIDE28_SEARCH_MCP_HOME", str(test_home.resolve()))
+    monkeypatch.setenv("STRIDE28_XHS_RISK_COOLDOWN_SECONDS", "30")
+    current = {"value": 500.0}
+
+    monkeypatch.setattr(lifecycle_module.time, "time", lambda: current["value"])
+
+    manager = LifecycleManager()
+    manager.activate_risk_cooldown("xiaohongshu", "search_blocked")
+
+    state_file = test_home / "runtime_state" / "shared_default" / "xhs_risk_cooldown.json"
+    payload = json.loads(state_file.read_text(encoding="utf-8"))
+    assert payload["reason"] == "search_blocked"
+    assert payload["expires_at_epoch"] == 530.0
+
+    reloaded = LifecycleManager()
+    restored = reloaded.get_risk_cooldown("xiaohongshu")
+    assert restored["active"] is True
+    assert restored["reason"] == "search_blocked"
+    if test_home.exists():
+        shutil.rmtree(test_home)

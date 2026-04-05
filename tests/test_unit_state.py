@@ -55,3 +55,12 @@ def test_platform_headless_falls_back_to_legacy_env(monkeypatch):
     monkeypatch.setenv("STRIDE28_SEARCH_MCP_HEADLESS", "false")
     monkeypatch.delenv("STRIDE28_XHS_HEADLESS", raising=False)
     assert state.get_platform_headless("xhs") is False
+
+
+def test_risk_cooldown_path_uses_profile_when_set(monkeypatch):
+    monkeypatch.setenv("STRIDE28_SEARCH_MCP_HOME", r"C:\tmp\stride28")
+    monkeypatch.setenv("STRIDE28_SEARCH_MCP_PROFILE", "kiro")
+    assert (
+        state.get_risk_cooldown_path("xhs")
+        == Path(r"C:\tmp\stride28") / "runtime_state" / "profiles" / "kiro" / "xhs_risk_cooldown.json"
+    )

@@ -184,7 +184,7 @@ Work Buddy 示例（实验性）：
 |------|------|--------|------|
 | `note_id` | string | 必填 | 笔记 ID |
 | `xsec_token` | string | `""` | 安全 token |
-| `max_comments` | int | 50 | 最大评论数 |
+| `max_comments` | int | 10 | 最大评论数；默认只取较少评论，减少翻页强度 |
 
 ### get_zhihu_question
 
@@ -265,7 +265,8 @@ stride28-search-mcp clear-state all
 3. 先调用 `login_xiaohongshu`，不扫码时不应返回成功
 4. 再调用 `search_xiaohongshu`，未登录时必须返回 `login_required`
 5. 完成登录后再次搜索，若仍空结果会明确返回 `search_blocked` 或 `captcha_detected`
-6. 知乎同理，先 `login_zhihu` 再 `search_zhihu`
+6. `get_note_detail` 默认只返回较少评论；如需更深评论翻页，请显式提高 `max_comments`
+7. 知乎同理，先 `login_zhihu` 再 `search_zhihu`
 
 ## 测试策略
 

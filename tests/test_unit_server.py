@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 
-from stride28_search_mcp.adapter import SearchBlockedError
+from stride28_search_mcp.adapter import LoginRequiredError, SearchBlockedError
 from stride28_search_mcp.server import (
     _clear_state_targets,
     lifecycle,
@@ -17,22 +17,16 @@ async def _noop(*args, **kwargs):
 
 
 class _FakeXhsLoginRequiredSearcher:
-    async def check_auth(self):
-        return False
+    async def search(self, query, limit, note_type):
+        raise LoginRequiredError("xiaohongshu")
 
 
 class _FakeXhsBlockedSearcher:
-    async def check_auth(self):
-        return True
-
     async def search(self, query, limit, note_type):
         raise SearchBlockedError("blocked in test")
 
 
 class _FakeXhsSearchOkSearcher:
-    async def check_auth(self):
-        return True
-
     async def search(self, query, limit, note_type):
         from stride28_search_mcp.models import SearchData
 

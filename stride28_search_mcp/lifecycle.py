@@ -2,15 +2,20 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import random
 import time
+from pathlib import Path
 from typing import Dict, Optional, Set
+
+from stride28_search_mcp.state import get_risk_cooldown_path
 
 logger = logging.getLogger(__name__)
 
 _MAX_FAILURES = 3
+_RISK_STATE_PLATFORM = {"xiaohongshu": "xhs", "zhihu": "zhihu"}
 
 _WHITELIST_TOOLS: Set[str] = {"login_xiaohongshu", "login_zhihu"}
 
@@ -75,6 +80,7 @@ class LifecycleManager:
         self.rate_limiter = RateLimiter(
             min_interval=float(os.getenv("STRIDE28_RATE_LIMIT_SECONDS", "5.0"))
         )
+        self._load_persisted_risk_cooldown("xiaohongshu")
 
     def get_lock(self, platform: str) -> asyncio.Lock:
         if platform not in self._locks:
@@ -109,12 +115,65 @@ class LifecycleManager:
     def is_crashed(self, platform: str) -> bool:
         return self._failures.get(platform, 0) >= _MAX_FAILURES
 
+    def _risk_cooldown_file(self, platform: str) -> Path:
+        storage_platform = _RISK_STATE_PLATFORM.get(platform)
+        if not storage_platform:
+            raise ValueError(f"unsupported platform: {platform}")
+        return get_risk_cooldown_path(storage_platform)
+
+    def _load_persisted_risk_cooldown(self, platform: str):
+        if platform != "xiaohongshu":
+            return
+
+        path = self._risk_cooldown_file(platform)
+        if not path.exists():
+            return
+
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            expires_at = float(payload.get("expires_at_epoch", 0))
+            reason = str(payload.get("reason", "")).strip()
+        except Exception as exc:
+            logger.warning("读取风控冷却文件失败: %s", exc)
+            try:
+                path.unlink()
+            except OSError:
+                pass
+            return
+
+        remaining = expires_at - time.time()
+        if remaining <= 0:
+            self.clear_risk_cooldown(platform)
+            return
+
+        self._risk_cooldowns[platform] = expires_at
+        self._risk_reasons[platform] = reason
+
+    def _persist_risk_cooldown(self, platform: str):
+        if platform != "xiaohongshu":
+            return
+
+        expires_at = self._risk_cooldowns.get(platform)
+        if not expires_at:
+            return
+
+        path = self._risk_cooldown_file(platform)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "platform": platform,
+            "expires_at_epoch": expires_at,
+            "reason": self._risk_reasons.get(platform, ""),
+            "cooldown_seconds": self._xhs_risk_cooldown_seconds,
+        }
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
     def activate_risk_cooldown(self, platform: str, reason: str = ""):
         if platform != "xiaohongshu":
             return
-        expires_at = time.monotonic() + self._xhs_risk_cooldown_seconds
+        expires_at = time.time() + self._xhs_risk_cooldown_seconds
         self._risk_cooldowns[platform] = expires_at
         self._risk_reasons[platform] = reason.strip()
+        self._persist_risk_cooldown(platform)
         logger.warning(
             "平台 %s 进入风控冷却期 %d 秒，原因=%s",
             platform,
@@ -125,10 +184,17 @@ class LifecycleManager:
     def clear_risk_cooldown(self, platform: str):
         self._risk_cooldowns.pop(platform, None)
         self._risk_reasons.pop(platform, None)
+        try:
+            self._risk_cooldown_file(platform).unlink()
+        except (ValueError, OSError):
+            pass
 
     def get_risk_cooldown(self, platform: str) -> Dict[str, object]:
         if platform != "xiaohongshu":
             return {"active": False, "remaining_seconds": 0, "reason": "", "cooldown_seconds": 0}
+
+        if platform not in self._risk_cooldowns:
+            self._load_persisted_risk_cooldown(platform)
 
         expires_at = self._risk_cooldowns.get(platform)
         if not expires_at:
@@ -139,7 +205,7 @@ class LifecycleManager:
                 "cooldown_seconds": self._xhs_risk_cooldown_seconds,
             }
 
-        remaining = int(max(0, expires_at - time.monotonic()))
+        remaining = int(max(0, expires_at - time.time()))
         if remaining <= 0:
             self.clear_risk_cooldown(platform)
             return {
