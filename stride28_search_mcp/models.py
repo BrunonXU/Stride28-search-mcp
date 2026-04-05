@@ -20,6 +20,7 @@ class ErrorCode(str, Enum):
     LOGIN_TIMEOUT = "login_timeout"
     SEARCH_TIMEOUT = "search_timeout"
     SEARCH_BLOCKED = "search_blocked"
+    RISK_COOLDOWN_ACTIVE = "risk_cooldown_active"
     BROWSER_INIT_FAILED = "browser_init_failed"
     BROWSER_CRASHED = "browser_crashed"
     UNKNOWN_ERROR = "unknown_error"
@@ -32,6 +33,7 @@ _RETRYABLE_MAP: Dict[ErrorCode, bool] = {
     ErrorCode.LOGIN_TIMEOUT: True,
     ErrorCode.SEARCH_TIMEOUT: True,
     ErrorCode.SEARCH_BLOCKED: False,
+    ErrorCode.RISK_COOLDOWN_ACTIVE: False,
     ErrorCode.BROWSER_INIT_FAILED: False,
     ErrorCode.BROWSER_CRASHED: False,
     ErrorCode.UNKNOWN_ERROR: False,

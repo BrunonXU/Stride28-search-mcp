@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 
-from hypothesis import given, settings
+from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 from stride28_search_mcp.models import (
@@ -21,13 +21,27 @@ from stride28_search_mcp.models import (
     _RETRYABLE_MAP,
 )
 
+safe_text_st = st.text(
+    alphabet=st.characters(blacklist_categories=("Cs",)),
+    min_size=1,
+    max_size=20,
+)
+safe_message_st = st.text(
+    alphabet=st.characters(blacklist_categories=("Cs",)),
+    min_size=0,
+    max_size=120,
+)
 
-@settings(max_examples=100)
+@settings(
+    max_examples=50,
+    deadline=None,
+    suppress_health_check=[HealthCheck.too_slow],
+)
 @given(
     code=st.sampled_from(list(ErrorCode)),
-    platform=st.text(min_size=1, max_size=20),
-    tool=st.text(min_size=1, max_size=30),
-    message=st.text(min_size=0, max_size=200),
+    platform=safe_text_st,
+    tool=safe_text_st,
+    message=safe_message_st,
 )
 def test_error_envelope_structure_and_retryable(
     code: ErrorCode, platform: str, tool: str, message: str

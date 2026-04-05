@@ -33,3 +33,25 @@ def test_non_login_headless_defaults_true(monkeypatch):
 def test_non_login_headless_false_values(monkeypatch):
     monkeypatch.setenv("STRIDE28_SEARCH_MCP_HEADLESS", "false")
     assert state.get_non_login_headless() is False
+
+
+def test_platform_headless_defaults_are_conservative(monkeypatch):
+    monkeypatch.delenv("STRIDE28_SEARCH_MCP_HEADLESS", raising=False)
+    monkeypatch.delenv("STRIDE28_XHS_HEADLESS", raising=False)
+    monkeypatch.delenv("STRIDE28_ZHIHU_HEADLESS", raising=False)
+    assert state.get_platform_headless("xhs") is False
+    assert state.get_platform_headless("zhihu") is True
+
+
+def test_platform_headless_prefers_specific_env(monkeypatch):
+    monkeypatch.setenv("STRIDE28_SEARCH_MCP_HEADLESS", "true")
+    monkeypatch.setenv("STRIDE28_XHS_HEADLESS", "false")
+    monkeypatch.setenv("STRIDE28_ZHIHU_HEADLESS", "false")
+    assert state.get_platform_headless("xhs") is False
+    assert state.get_platform_headless("zhihu") is False
+
+
+def test_platform_headless_falls_back_to_legacy_env(monkeypatch):
+    monkeypatch.setenv("STRIDE28_SEARCH_MCP_HEADLESS", "false")
+    monkeypatch.delenv("STRIDE28_XHS_HEADLESS", raising=False)
+    assert state.get_platform_headless("xhs") is False

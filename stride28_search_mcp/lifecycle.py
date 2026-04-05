@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import random
 import time
 from typing import Dict, Optional, Set
 
@@ -17,9 +18,16 @@ _WHITELIST_TOOLS: Set[str] = {"login_xiaohongshu", "login_zhihu"}
 class RateLimiter:
     """统一请求频率控制器 —— 所有 tool call 的入口层"""
 
-    def __init__(self, min_interval: float = 2.0):
+    def __init__(
+        self,
+        min_interval: float = 5.0,
+        xhs_jitter_min: float = 0.5,
+        xhs_jitter_max: float = 2.0,
+    ):
         self._min_interval = min_interval
         self._last_request: Dict[str, float] = {}
+        self._xhs_jitter_min = xhs_jitter_min
+        self._xhs_jitter_max = xhs_jitter_max
 
     def is_whitelisted(self, tool_name: str) -> bool:
         """判断 tool 是否在白名单中（login/health check 跳过限流）"""
@@ -40,6 +48,15 @@ class RateLimiter:
                 tool_name,
             )
             await asyncio.sleep(wait_time)
+        if platform == "xiaohongshu":
+            jitter = random.uniform(self._xhs_jitter_min, self._xhs_jitter_max)
+            logger.info(
+                "RateLimiter: 追加 %.1f 秒抖动 (platform=%s, tool=%s)",
+                jitter,
+                platform,
+                tool_name,
+            )
+            await asyncio.sleep(jitter)
         self._last_request[platform] = time.monotonic()
 
 
@@ -50,8 +67,13 @@ class LifecycleManager:
         self._searchers: Dict[str, object] = {}
         self._locks: Dict[str, asyncio.Lock] = {}
         self._failures: Dict[str, int] = {}
+        self._risk_cooldowns: Dict[str, float] = {}
+        self._risk_reasons: Dict[str, str] = {}
+        self._xhs_risk_cooldown_seconds = int(
+            float(os.getenv("STRIDE28_XHS_RISK_COOLDOWN_SECONDS", "900"))
+        )
         self.rate_limiter = RateLimiter(
-            min_interval=float(os.getenv("STRIDE28_RATE_LIMIT_SECONDS", "2.0"))
+            min_interval=float(os.getenv("STRIDE28_RATE_LIMIT_SECONDS", "5.0"))
         )
 
     def get_lock(self, platform: str) -> asyncio.Lock:
@@ -86,6 +108,53 @@ class LifecycleManager:
 
     def is_crashed(self, platform: str) -> bool:
         return self._failures.get(platform, 0) >= _MAX_FAILURES
+
+    def activate_risk_cooldown(self, platform: str, reason: str = ""):
+        if platform != "xiaohongshu":
+            return
+        expires_at = time.monotonic() + self._xhs_risk_cooldown_seconds
+        self._risk_cooldowns[platform] = expires_at
+        self._risk_reasons[platform] = reason.strip()
+        logger.warning(
+            "平台 %s 进入风控冷却期 %d 秒，原因=%s",
+            platform,
+            self._xhs_risk_cooldown_seconds,
+            reason.strip() or "unknown",
+        )
+
+    def clear_risk_cooldown(self, platform: str):
+        self._risk_cooldowns.pop(platform, None)
+        self._risk_reasons.pop(platform, None)
+
+    def get_risk_cooldown(self, platform: str) -> Dict[str, object]:
+        if platform != "xiaohongshu":
+            return {"active": False, "remaining_seconds": 0, "reason": "", "cooldown_seconds": 0}
+
+        expires_at = self._risk_cooldowns.get(platform)
+        if not expires_at:
+            return {
+                "active": False,
+                "remaining_seconds": 0,
+                "reason": "",
+                "cooldown_seconds": self._xhs_risk_cooldown_seconds,
+            }
+
+        remaining = int(max(0, expires_at - time.monotonic()))
+        if remaining <= 0:
+            self.clear_risk_cooldown(platform)
+            return {
+                "active": False,
+                "remaining_seconds": 0,
+                "reason": "",
+                "cooldown_seconds": self._xhs_risk_cooldown_seconds,
+            }
+
+        return {
+            "active": True,
+            "remaining_seconds": remaining,
+            "reason": self._risk_reasons.get(platform, ""),
+            "cooldown_seconds": self._xhs_risk_cooldown_seconds,
+        }
 
     async def cleanup(self):
         for platform in list(self._searchers.keys()):

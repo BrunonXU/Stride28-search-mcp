@@ -39,7 +39,7 @@ def test_is_whitelisted_returns_false_for_non_login_tools():
 
 def test_default_min_interval():
     rl = RateLimiter()
-    assert rl._min_interval == 2.0
+    assert rl._min_interval == 5.0
 
 
 def test_custom_min_interval():
@@ -63,9 +63,9 @@ async def test_acquire_skips_whitelisted_tool():
 async def test_acquire_enforces_interval_for_non_whitelisted():
     """Non-whitelisted tools should wait min_interval between calls on same platform."""
     rl = RateLimiter(min_interval=0.2)
-    await rl.acquire("xiaohongshu", "search_xiaohongshu")
+    await rl.acquire("zhihu", "search_zhihu")
     start = time.monotonic()
-    await rl.acquire("xiaohongshu", "search_xiaohongshu")
+    await rl.acquire("zhihu", "search_zhihu")
     elapsed = time.monotonic() - start
     assert elapsed >= 0.15  # Allow small tolerance
 
@@ -87,7 +87,7 @@ def test_lifecycle_manager_has_rate_limiter():
     with patch.dict(os.environ, {}, clear=False):
         lm = LifecycleManager()
         assert isinstance(lm.rate_limiter, RateLimiter)
-        assert lm.rate_limiter._min_interval == 2.0
+        assert lm.rate_limiter._min_interval == 5.0
 
 
 def test_lifecycle_manager_reads_env_var():

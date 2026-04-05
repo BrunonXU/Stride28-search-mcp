@@ -104,10 +104,11 @@ Kiro 示例：
 {
   "mcpServers": {
     "stride28-search": {
-      "command": "uvx",
-      "args": ["stride28-search-mcp"],
+      "command": "stride28-search-mcp",
       "env": {
-        "STRIDE28_SEARCH_MCP_PROFILE": "kiro"
+        "STRIDE28_SEARCH_MCP_PROFILE": "kiro",
+        "STRIDE28_XHS_HEADLESS": "false",
+        "STRIDE28_ZHIHU_HEADLESS": "true"
       },
       "disabled": false
     }
@@ -115,7 +116,7 @@ Kiro 示例：
 }
 ```
 
-Work Buddy 示例：
+Work Buddy 示例（实验性）：
 
 ```json
 {
@@ -124,7 +125,9 @@ Work Buddy 示例：
       "command": "uvx",
       "args": ["stride28-search-mcp"],
       "env": {
-        "STRIDE28_SEARCH_MCP_PROFILE": "workbuddy"
+        "STRIDE28_SEARCH_MCP_PROFILE": "workbuddy",
+        "STRIDE28_XHS_HEADLESS": "false",
+        "STRIDE28_ZHIHU_HEADLESS": "true"
       },
       "disabled": false
     }
@@ -132,8 +135,10 @@ Work Buddy 示例：
 }
 ```
 
+> `uvx + WorkBuddy + 小红书搜索` 当前只作为实验性路径保留，不作为发版前必过项。默认推荐已安装包的 stdio 配置。
+
 <details>
-<summary>用 uvx 免安装运行</summary>
+<summary>用 uvx 免安装运行（实验性）</summary>
 
 ```json
 {
@@ -202,6 +207,7 @@ Work Buddy 示例：
 | `login_timeout` | 登录超时 | ✓ | 重新登录 |
 | `search_timeout` | 搜索超时 | ✓ | 稍后重试 |
 | `search_blocked` | 搜索结果异常为空 | ✗ | 检查无头模式、风控或重新登录 |
+| `risk_cooldown_active` | 风控冷却中 | ✗ | 等待冷却结束或清空状态后重测 |
 | `browser_init_failed` | 浏览器启动失败 | ✗ | `stride28-search-mcp install-browser` |
 | `browser_crashed` | 浏览器崩溃 | ✗ | 重启 MCP Server |
 | `captcha_detected` | 验证码拦截 | ✗ | 等待后重试 |
@@ -216,10 +222,20 @@ Work Buddy 示例：
 |------|--------|------|
 | `STRIDE28_SEARCH_MCP_HOME` | `~/.stride28-search-mcp` | 数据目录 |
 | `STRIDE28_SEARCH_MCP_PROFILE` | `""` | 浏览器 profile 名；为空时走兼容模式，共享默认目录，不推荐 |
-| `STRIDE28_SEARCH_MCP_HEADLESS` | `true` | 非登录场景是否无头运行；疑难环境可设为 `false` 排查 |
-| `STRIDE28_RATE_LIMIT_SECONDS` | `2.0` | 请求最小间隔（秒） |
+| `STRIDE28_XHS_HEADLESS` | `false` | 小红书非登录工具默认有头，优先降低风控 |
+| `STRIDE28_ZHIHU_HEADLESS` | `true` | 知乎默认无头 |
+| `STRIDE28_SEARCH_MCP_HEADLESS` | `true` | 兼容旧版本的全局 fallback，不再是主推荐配置 |
+| `STRIDE28_RATE_LIMIT_SECONDS` | `5.0` | 请求最小间隔（秒） |
+| `STRIDE28_XHS_RISK_COOLDOWN_SECONDS` | `900` | 小红书命中风控后的冷却时长（秒） |
 
 </details>
+
+## 小红书状态机
+
+- `未登录`：`search_xiaohongshu` / `get_note_detail` 返回 `login_required`
+- `已登录`：允许搜索和详情读取
+- `搜索被拦截`：返回 `search_blocked`
+- `风控冷却中`：返回 `risk_cooldown_active`，默认冷却 15 分钟
 
 ## 首次测试建议
 
@@ -245,11 +261,18 @@ stride28-search-mcp clear-state all
 推荐测试顺序：
 
 1. 为当前客户端设置独立 `STRIDE28_SEARCH_MCP_PROFILE`
-2. 运行 `stride28-search-mcp doctor`，确认 profile、浏览器目录、cookie 库路径正确
+2. 运行 `stride28-search-mcp doctor`，确认 profile、浏览器目录、cookie 库路径、小红书/知乎 headless 设置、风控冷却状态正确
 3. 先调用 `login_xiaohongshu`，不扫码时不应返回成功
 4. 再调用 `search_xiaohongshu`，未登录时必须返回 `login_required`
 5. 完成登录后再次搜索，若仍空结果会明确返回 `search_blocked` 或 `captcha_detected`
 6. 知乎同理，先 `login_zhihu` 再 `search_zhihu`
+
+## 测试策略
+
+- 日常回归优先跑离线测试：认证状态机、快照回放、限流/熔断测试
+- 真实平台只保留 1 个低频人工 canary 账号
+- canary 每次只做 1 次登录验证 + 1 次搜索 + 1 次详情验证
+- 不建议拿多个小号做批量压测，也不要做连续自动回归
 
 ## 开发
 

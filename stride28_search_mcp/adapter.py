@@ -9,16 +9,24 @@ import asyncio
 import json
 import logging
 import urllib.parse
+from dataclasses import dataclass, field
 from typing import List, Optional
 
 from playwright.async_api import async_playwright, BrowserContext, Page
 
 from stride28_search_mcp.models import SearchResultItem, SearchData
-from stride28_search_mcp.state import get_browser_data_dir, get_non_login_headless
+from stride28_search_mcp.state import get_browser_data_dir, get_platform_headless
+
+try:
+    from playwright_stealth import stealth_async
+    _HAS_STEALTH = True
+except ImportError:
+    _HAS_STEALTH = False
 
 logger = logging.getLogger(__name__)
 
 _XHS_INDEX = "https://www.xiaohongshu.com/explore"
+_LOGIN_COOKIE_NAMES = ("galaxy_creator_session_id", "customer-sso-sid")
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -54,6 +62,14 @@ class SearchBlockedError(Exception):
         super().__init__(f"搜索被拦截: {detail}")
 
 
+@dataclass(slots=True)
+class XhsAuthResult:
+    logged_in: bool
+    source: str = "none"
+    reason: str = ""
+    login_cookie_names: List[str] = field(default_factory=list)
+
+
 class XhsBrowserSearcher:
     """纯浏览器小红书搜索器（使用 Chromium）"""
 
@@ -64,6 +80,7 @@ class XhsBrowserSearcher:
         self._page: Optional[Page] = None
         self._initialized = False
         self._browser_data_dir = get_browser_data_dir("xhs")
+        self._last_auth_result: Optional[XhsAuthResult] = None
 
     async def _launch_context(self, headless: bool = True) -> BrowserContext:
         """启动 Chromium persistent context"""
@@ -92,74 +109,156 @@ class XhsBrowserSearcher:
         logger.info("MCP: 初始化小红书浏览器 (headless=%s)...", headless)
         self._context = await self._launch_context(headless)
         self._page = await self._context.new_page()
+        if _HAS_STEALTH:
+            await stealth_async(self._page)
         self._initialized = True
         logger.info("MCP: 小红书浏览器就绪")
 
-    async def _is_logged_in(self) -> bool:
-        """通过多层 Fallback 检测是否真正登录（web_session 游客也有）"""
-        if not self._page or not self._context:
-            return False
-        method_used = None
-        # 方法1: selfinfo API
-        try:
-            result = await self._page.evaluate("""async () => {
-                try {
-                    const resp = await fetch('/api/sns/web/v1/user/selfinfo', { credentials: 'include' });
-                    const data = await resp.json();
-                    if (data && data.success) return true;
-                    if (data && data.result && data.result.success) return true;
-                    if (data && data.data && data.data.user_id) return true;
-                    return false;
-                } catch(e) { return false; }
-            }""")
-            if result:
-                method_used = "selfinfo_api"
-                logger.info("MCP: 登录检测通过 (method=%s)", method_used)
-                return True
-        except Exception as e:
-            logger.warning("MCP: selfinfo API 检测失败: %s", e)
-
-        # 方法2: DOM 元素检测（参考 xpzouying/xiaohongshu-mcp）
-        try:
-            user_channel = await self._page.query_selector(
-                '.main-container .user .link-wrapper .channel'
-            )
-            if user_channel:
-                method_used = "dom_user_channel"
-                logger.info("MCP: 登录检测通过 (method=%s)", method_used)
-                return True
-        except Exception as e:
-            logger.warning("MCP: DOM 元素检测失败: %s", e)
-
-        # 方法3: Cookie 检测（排除游客 web_session）
+    async def _get_login_cookie_names(self) -> List[str]:
+        if not self._context:
+            return []
         try:
             cookies = await self._context.cookies()
-            # 游客也有 web_session，需要检查更可靠的登录标识
-            has_login_cookie = any(
-                c.get("name") in ("galaxy_creator_session_id", "customer-sso-sid")
-                and c.get("value")
-                for c in cookies
-            )
-            if has_login_cookie:
-                method_used = "cookie_login_id"
-                logger.info("MCP: 登录检测通过 (method=%s)", method_used)
-                return True
-        except Exception as e:
-            logger.warning("MCP: Cookie 检测失败: %s", e)
+        except Exception as exc:
+            logger.warning("MCP: 读取 Cookie 失败: %s", exc)
+            return []
 
-        logger.warning("MCP: 所有登录检测方法均失败")
-        return False
+        return sorted(
+            {
+                cookie.get("name", "")
+                for cookie in cookies
+                if cookie.get("name") in _LOGIN_COOKIE_NAMES and cookie.get("value")
+            }
+        )
+
+    async def _fetch_selfinfo_state(self) -> dict:
+        if not self._page:
+            return {"success": False, "reason": "page_unavailable"}
+
+        try:
+            return await self._page.evaluate("""async () => {
+                try {
+                    const response = await fetch('/api/sns/web/v1/user/selfinfo', {
+                        credentials: 'include'
+                    });
+                    const text = await response.text();
+                    let data = null;
+                    let parseable = false;
+                    try {
+                        data = text ? JSON.parse(text) : null;
+                        parseable = !!data;
+                    } catch (error) {
+                        parseable = false;
+                    }
+                    const success = !!(
+                        data && (
+                            data.success === true ||
+                            (data.result && data.result.success === true) ||
+                            (data.data && data.data.user_id)
+                        )
+                    );
+                    return {
+                        success,
+                        status: response.status,
+                        parseable,
+                        body_prefix: (text || '').slice(0, 160),
+                    };
+                } catch (error) {
+                    return {
+                        success: false,
+                        reason: String(error),
+                        parseable: false,
+                        status: 0,
+                        body_prefix: '',
+                    };
+                }
+            }""")
+        except Exception as exc:
+            logger.warning("MCP: selfinfo API 检测失败: %s", exc)
+            return {"success": False, "reason": str(exc), "parseable": False, "status": 0}
+
+    async def _detect_auth_result(self) -> XhsAuthResult:
+        if not self._page or not self._context:
+            result = XhsAuthResult(
+                logged_in=False,
+                source="uninitialized",
+                reason="browser_not_ready",
+            )
+            self._last_auth_result = result
+            return result
+
+        login_cookie_names = await self._get_login_cookie_names()
+        selfinfo_state = await self._fetch_selfinfo_state()
+
+        if selfinfo_state.get("success"):
+            result = XhsAuthResult(
+                logged_in=True,
+                source="selfinfo_api",
+                reason=f"status={selfinfo_state.get('status', 0)}",
+                login_cookie_names=login_cookie_names,
+            )
+            self._last_auth_result = result
+            return result
+
+        if login_cookie_names:
+            result = XhsAuthResult(
+                logged_in=True,
+                source="login_cookie",
+                reason="matched_whitelisted_login_cookie",
+                login_cookie_names=login_cookie_names,
+            )
+            self._last_auth_result = result
+            return result
+
+        reason = selfinfo_state.get("reason", "").strip()
+        if not reason:
+            if selfinfo_state.get("parseable") is False and selfinfo_state.get("body_prefix"):
+                preview = str(selfinfo_state.get("body_prefix", "")).strip()
+                reason = f"selfinfo_non_json:{preview[:80]}"
+            else:
+                reason = f"selfinfo_status={selfinfo_state.get('status', 0)}"
+
+        result = XhsAuthResult(
+            logged_in=False,
+            source="none",
+            reason=reason,
+            login_cookie_names=login_cookie_names,
+        )
+        self._last_auth_result = result
+        return result
+
+    async def _get_auth_result(self, force_refresh: bool = False) -> XhsAuthResult:
+        if self._last_auth_result is not None and not force_refresh:
+            return self._last_auth_result
+
+        result = await self._detect_auth_result()
+        logger.info(
+            "MCP: 登录检测结果 logged_in=%s source=%s cookies=%s reason=%s",
+            result.logged_in,
+            result.source,
+            result.login_cookie_names,
+            result.reason,
+        )
+        return result
+
+    async def _is_logged_in(self) -> bool:
+        return (await self._get_auth_result(force_refresh=True)).logged_in
 
     async def check_auth(self) -> bool:
         if not self._browser_data_dir.exists():
             return False
         try:
-            await self.init_browser(headless=get_non_login_headless())
+            await self.init_browser(headless=get_platform_headless("xhs"))
             await self._page.goto(_XHS_INDEX, wait_until="domcontentloaded", timeout=30000)
             await self._page.wait_for_timeout(2000)
-            logged_in = await self._is_logged_in()
-            logger.info("MCP: check_auth 已登录=%s", logged_in)
-            return logged_in
+            auth_result = await self._get_auth_result(force_refresh=True)
+            logger.info(
+                "MCP: check_auth 已登录=%s source=%s reason=%s",
+                auth_result.logged_in,
+                auth_result.source,
+                auth_result.reason,
+            )
+            return auth_result.logged_in
         except Exception as e:
             logger.warning("MCP: check_auth 异常: %s", e)
             raise BrowserLaunchError(str(e)) from e
@@ -174,8 +273,13 @@ class XhsBrowserSearcher:
         except Exception:
             return False
 
-    async def _raise_for_empty_results(self, query: str) -> None:
-        if not await self._is_logged_in():
+    async def _raise_for_empty_results(
+        self,
+        query: str,
+        auth_result: Optional[XhsAuthResult] = None,
+    ) -> None:
+        auth_result = auth_result or await self._get_auth_result()
+        if not auth_result.logged_in:
             raise LoginRequiredError("xiaohongshu")
         if await self._check_captcha():
             raise CaptchaDetectedError("搜索结果为空且检测到验证码")
@@ -185,7 +289,7 @@ class XhsBrowserSearcher:
 
     async def search(self, query: str, limit: int = 10, note_type: str = "all") -> SearchData:
         if not self._initialized:
-            await self.init_browser(headless=get_non_login_headless())
+            await self.init_browser(headless=get_platform_headless("xhs"))
 
         search_url = self._make_search_url(query, note_type)
         logger.info("MCP: 导航到搜索页: %s", search_url)
@@ -224,7 +328,7 @@ class XhsBrowserSearcher:
 
         if not raw_json:
             logger.warning("MCP: 搜索结果为空 (query='%s')", query)
-            await self._raise_for_empty_results(query)
+            await self._raise_for_empty_results(query, auth_result=await self._get_auth_result())
 
         try:
             feeds = json.loads(raw_json)
@@ -235,7 +339,7 @@ class XhsBrowserSearcher:
         items = self._parse_feeds(feeds, limit)
         if not items:
             logger.warning("MCP: feeds 已加载但解析后为空 (query='%s')", query)
-            await self._raise_for_empty_results(query)
+            await self._raise_for_empty_results(query, auth_result=await self._get_auth_result())
         logger.info("MCP: 搜索完成，返回 %d 条结果 (query='%s')", len(items), query)
         return SearchData(results=items, total_requested=limit, total_returned=len(items))
 
@@ -255,7 +359,8 @@ class XhsBrowserSearcher:
         for i in range(max_polls):
             await self._page.wait_for_timeout(5000)
             try:
-                is_real_login = await self._is_logged_in()
+                auth_result = await self._get_auth_result(force_refresh=True)
+                is_real_login = auth_result.logged_in
             except Exception as e:
                 logger.warning("MCP: login 严格检测异常: %s", e)
                 is_real_login = False
@@ -274,6 +379,7 @@ class XhsBrowserSearcher:
     async def close(self):
         self._initialized = False
         self._page = None
+        self._last_auth_result = None
         try:
             if self._context:
                 await self._context.close()
@@ -416,7 +522,7 @@ class XhsBrowserSearcher:
     async def get_note_detail(self, note_id: str, xsec_token: str = "", max_comments: int = 50) -> "NoteDetail":
         from stride28_search_mcp.models import NoteDetail, CommentItem
         if not self._initialized:
-            await self.init_browser(headless=get_non_login_headless())
+            await self.init_browser(headless=get_platform_headless("xhs"))
 
         url = f"https://www.xiaohongshu.com/explore/{note_id}"
         if xsec_token:

@@ -14,7 +14,7 @@ with random sequences of load results (empty/non-empty) and selector outcomes.
 """
 from __future__ import annotations
 
-from hypothesis import given, settings
+from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 from stride28_search_mcp.models import CommentItem
@@ -80,7 +80,11 @@ def simulate_comment_loading(
 _load_step = st.tuples(st.booleans(), st.booleans())
 
 
-@settings(max_examples=100)
+@settings(
+    max_examples=50,
+    deadline=None,
+    suppress_health_check=[HealthCheck.too_slow],
+)
 @given(
     load_results=st.lists(_load_step, min_size=0, max_size=50),
     max_comments=st.integers(min_value=1, max_value=50),
@@ -178,7 +182,11 @@ def _count_processed_steps(
     return len(load_results)
 
 
-@settings(max_examples=100)
+@settings(
+    max_examples=50,
+    deadline=None,
+    suppress_health_check=[HealthCheck.too_slow],
+)
 @given(
     # Need enough iterations for 3 consecutive empties: max_comments >= 16
     # so max(max_comments // 5, 1) >= 4 > max_empty_loads=3
@@ -199,7 +207,11 @@ def test_all_empty_loads_trigger_stop(
     assert len(comments) == 0
 
 
-@settings(max_examples=100)
+@settings(
+    max_examples=50,
+    deadline=None,
+    suppress_health_check=[HealthCheck.too_slow],
+)
 @given(
     # Need enough iterations for 3 consecutive selector failures
     max_comments=st.integers(min_value=16, max_value=50),

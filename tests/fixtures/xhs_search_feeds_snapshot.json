@@ -1,0 +1,55 @@
+[
+  {
+    "id": "note-001",
+    "xsec_token": "tok-001",
+    "note_card": {
+      "display_title": "RAG 面试题整理",
+      "user": {
+        "nickname": "alice"
+      },
+      "interact_info": {
+        "liked_count": "128"
+      },
+      "cover": {
+        "url_default": "https://example.com/cover-1.jpg"
+      },
+      "type": "normal",
+      "time": "1712000000"
+    }
+  },
+  {
+    "id": "note-empty-title",
+    "xsec_token": "tok-empty",
+    "note_card": {
+      "display_title": "",
+      "user": {
+        "nickname": "ghost"
+      },
+      "interact_info": {
+        "liked_count": "0"
+      },
+      "cover": {
+        "url_default": ""
+      },
+      "type": "normal"
+    }
+  },
+  {
+    "id": "note-002",
+    "xsec_token": "tok-002",
+    "note_card": {
+      "display_title": "Agent 工作流模板",
+      "user": {
+        "nickname": "bob"
+      },
+      "interact_info": {
+        "liked_count": "64"
+      },
+      "cover": {
+        "url_default": "https://example.com/cover-2.jpg"
+      },
+      "type": "video",
+      "time": "1712000100"
+    }
+  }
+]

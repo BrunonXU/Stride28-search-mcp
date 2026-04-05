@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 import logging
+import math
 import signal
 import subprocess
 import sys
@@ -38,6 +39,7 @@ from stride28_search_mcp.state import (
     get_browser_data_dir,
     get_data_home,
     get_non_login_headless,
+    get_platform_headless,
     get_profile_mode,
     get_profile_name,
 )
@@ -63,6 +65,31 @@ def _profile_display_name() -> str:
     return get_profile_name() or "shared-default"
 
 
+def _cooldown_message(remaining_seconds: int, reason: str = "") -> str:
+    minutes = max(1, math.ceil(remaining_seconds / 60))
+    suffix = f" 最近触发原因: {reason}." if reason else ""
+    return (
+        f"小红书当前处于风控冷却期，请等待约 {minutes} 分钟后再重试。"
+        f"{suffix} 如需重新回到首次用户状态，可先执行 `reset_xiaohongshu_login` "
+        "或 `stride28-search-mcp clear-state xhs`。"
+    )
+
+
+def _active_cooldown_envelope(platform: str, tool_name: str) -> str | None:
+    cooldown = lifecycle.get_risk_cooldown(platform)
+    if not cooldown.get("active"):
+        return None
+    return EnvelopeBuilder.error(
+        platform,
+        tool_name,
+        ErrorCode.RISK_COOLDOWN_ACTIVE,
+        _cooldown_message(
+            int(cooldown.get("remaining_seconds", 0)),
+            str(cooldown.get("reason", "")),
+        ),
+    )
+
+
 def _clear_state_targets(target: str) -> list[tuple[str, str]]:
     normalized = target.strip().lower()
     if normalized in {"xhs", "xiaohongshu"}:
@@ -78,6 +105,7 @@ async def _clear_state(target: str) -> dict:
     cleared = []
     for platform, storage_platform in _clear_state_targets(target):
         await lifecycle.destroy_searcher(platform)
+        lifecycle.clear_risk_cooldown(platform)
         cleared_path = clear_browser_data(storage_platform)
         cleared.append(
             {
@@ -133,7 +161,9 @@ def _run_doctor() -> int:
         "data_home": str(data_home),
         "profile": _profile_display_name(),
         "profile_mode": get_profile_mode(),
-        "non_login_headless": get_non_login_headless(),
+        "legacy_headless_fallback": get_non_login_headless(),
+        "xhs_headless": get_platform_headless("xhs"),
+        "zhihu_headless": get_platform_headless("zhihu"),
         "checks": {},
     }
 
@@ -200,6 +230,10 @@ def _run_doctor() -> int:
             zhihu_cookie_store or (zhihu_browser_data_dir / "Default" / "Network" / "Cookies")
         ),
     }
+    report["checks"]["xhs_risk_cooldown"] = {
+        "ok": True,
+        "detail": lifecycle.get_risk_cooldown("xiaohongshu"),
+    }
 
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0
@@ -262,6 +296,9 @@ async def login_xiaohongshu() -> str:
 )
 async def search_xiaohongshu(query: str, limit: int = 10, note_type: str = "all") -> str:
     platform, tool_name = "xiaohongshu", "search_xiaohongshu"
+    cooldown_error = _active_cooldown_envelope(platform, tool_name)
+    if cooldown_error:
+        return cooldown_error
     await lifecycle.rate_limiter.acquire(platform, tool_name)
 
     if lifecycle.is_crashed(platform):
@@ -285,11 +322,13 @@ async def search_xiaohongshu(query: str, limit: int = 10, note_type: str = "all"
             lifecycle.reset_failures(platform)
             return EnvelopeBuilder.success(platform, tool_name, search_data.model_dump())
         except CaptchaDetectedError:
+            lifecycle.activate_risk_cooldown(platform, "captcha_detected")
             return EnvelopeBuilder.error(
                 platform, tool_name, ErrorCode.CAPTCHA_DETECTED,
                 "搜索结果为空且检测到验证码拦截，请稍后重试或手动处理验证码",
             )
         except SearchBlockedError as e:
+            lifecycle.activate_risk_cooldown(platform, "search_blocked")
             return EnvelopeBuilder.error(
                 platform, tool_name, ErrorCode.SEARCH_BLOCKED, str(e),
             )
@@ -332,6 +371,9 @@ async def search_xiaohongshu(query: str, limit: int = 10, note_type: str = "all"
 )
 async def get_note_detail(note_id: str, xsec_token: str = "", max_comments: int = 50) -> str:
     platform, tool_name = "xiaohongshu", "get_note_detail"
+    cooldown_error = _active_cooldown_envelope(platform, tool_name)
+    if cooldown_error:
+        return cooldown_error
     await lifecycle.rate_limiter.acquire(platform, tool_name)
     lock = lifecycle.get_lock(platform)
     async with lock:
@@ -347,6 +389,22 @@ async def get_note_detail(note_id: str, xsec_token: str = "", max_comments: int 
             )
             lifecycle.reset_failures(platform)
             return EnvelopeBuilder.success(platform, tool_name, detail.model_dump())
+        except CaptchaDetectedError:
+            lifecycle.activate_risk_cooldown(platform, "captcha_detected")
+            return EnvelopeBuilder.error(
+                platform, tool_name, ErrorCode.CAPTCHA_DETECTED,
+                "笔记详情加载期间检测到验证码拦截，请稍后重试或手动处理验证码",
+            )
+        except SearchBlockedError as e:
+            lifecycle.activate_risk_cooldown(platform, "search_blocked")
+            return EnvelopeBuilder.error(
+                platform, tool_name, ErrorCode.SEARCH_BLOCKED, str(e),
+            )
+        except LoginRequiredError:
+            return EnvelopeBuilder.error(
+                platform, tool_name, ErrorCode.LOGIN_REQUIRED,
+                "小红书未登录，请先调用 login_xiaohongshu",
+            )
         except asyncio.TimeoutError:
             return EnvelopeBuilder.error(
                 platform, tool_name, ErrorCode.SEARCH_TIMEOUT, "获取详情超时（30秒）",
@@ -539,11 +597,14 @@ async def reset_zhihu_login() -> str:
 
 def _sync_cleanup():
     try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop and loop.is_running():
             loop.create_task(lifecycle.cleanup())
         else:
-            loop.run_until_complete(lifecycle.cleanup())
+            asyncio.run(lifecycle.cleanup())
     except Exception:
         pass
 

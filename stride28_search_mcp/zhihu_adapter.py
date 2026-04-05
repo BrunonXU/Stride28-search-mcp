@@ -23,7 +23,7 @@ except ImportError:
 
 from stride28_search_mcp.adapter import BrowserLaunchError, LoginRequiredError
 from stride28_search_mcp.models import SearchResultItem, SearchData
-from stride28_search_mcp.state import get_browser_data_dir, get_non_login_headless
+from stride28_search_mcp.state import get_browser_data_dir, get_platform_headless
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +88,7 @@ class ZhihuBrowserSearcher:
         if not self._browser_data_dir.exists():
             return False
         try:
-            await self.init_browser(headless=get_non_login_headless())
+            await self.init_browser(headless=get_platform_headless("zhihu"))
             logged_in = await self._is_logged_in()
             logger.info("MCP: zhihu check_auth 已登录=%s", logged_in)
             return logged_in
@@ -98,13 +98,13 @@ class ZhihuBrowserSearcher:
 
     async def _is_logged_in(self) -> bool:
         if not self._initialized:
-            await self.init_browser(headless=get_non_login_headless())
+            await self.init_browser(headless=get_platform_headless("zhihu"))
         cookies = await self._context.cookies()
         return any(cookie.get("name") == "z_c0" and cookie.get("value") for cookie in cookies)
 
     async def search(self, query: str, limit: int = 10) -> SearchData:
         if not self._initialized:
-            await self.init_browser(headless=get_non_login_headless())
+            await self.init_browser(headless=get_platform_headless("zhihu"))
 
         captured: List[dict] = []
         login_required = False
@@ -162,7 +162,7 @@ class ZhihuBrowserSearcher:
     async def get_question_answers(self, question_id: str, limit: int = 5,
                                     max_content_length: int = 10000) -> dict:
         if not self._initialized:
-            await self.init_browser(headless=get_non_login_headless())
+            await self.init_browser(headless=get_platform_headless("zhihu"))
         if not await self._is_logged_in():
             raise LoginRequiredError("zhihu")
 

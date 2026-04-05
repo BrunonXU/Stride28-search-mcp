@@ -8,6 +8,14 @@ from pathlib import Path
 
 _DEFAULT_HOME = ".stride28-search-mcp"
 _HEADLESS_FALSE_VALUES = {"0", "false", "no", "off"}
+_HEADLESS_ENV_BY_PLATFORM = {
+    "xhs": "STRIDE28_XHS_HEADLESS",
+    "zhihu": "STRIDE28_ZHIHU_HEADLESS",
+}
+_HEADLESS_DEFAULT_BY_PLATFORM = {
+    "xhs": False,
+    "zhihu": True,
+}
 
 
 def get_data_home() -> Path:
@@ -38,9 +46,30 @@ def get_browser_data_dir(platform: str) -> Path:
     return browser_root / platform
 
 
+def _parse_headless(raw: str | None, default: bool) -> bool:
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() not in _HEADLESS_FALSE_VALUES
+
+
 def get_non_login_headless() -> bool:
-    raw = os.getenv("STRIDE28_SEARCH_MCP_HEADLESS", "true").strip().lower()
-    return raw not in _HEADLESS_FALSE_VALUES
+    return _parse_headless(os.getenv("STRIDE28_SEARCH_MCP_HEADLESS"), True)
+
+
+def get_platform_headless(platform: str) -> bool:
+    if platform not in _HEADLESS_DEFAULT_BY_PLATFORM:
+        raise ValueError(f"unsupported platform: {platform}")
+
+    specific_env = _HEADLESS_ENV_BY_PLATFORM[platform]
+    specific_value = os.getenv(specific_env)
+    if specific_value is not None and specific_value.strip():
+        return _parse_headless(specific_value, _HEADLESS_DEFAULT_BY_PLATFORM[platform])
+
+    legacy_value = os.getenv("STRIDE28_SEARCH_MCP_HEADLESS")
+    if legacy_value is not None and legacy_value.strip():
+        return _parse_headless(legacy_value, _HEADLESS_DEFAULT_BY_PLATFORM[platform])
+
+    return _HEADLESS_DEFAULT_BY_PLATFORM[platform]
 
 
 def find_cookie_store(platform: str) -> Path | None:

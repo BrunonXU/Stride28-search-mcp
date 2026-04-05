@@ -39,6 +39,12 @@ def test_error_code_has_search_blocked():
     assert ErrorCode.SEARCH_BLOCKED.value == "search_blocked"
 
 
+def test_error_code_has_risk_cooldown_active():
+    """ErrorCode enum should contain RISK_COOLDOWN_ACTIVE."""
+    assert hasattr(ErrorCode, "RISK_COOLDOWN_ACTIVE")
+    assert ErrorCode.RISK_COOLDOWN_ACTIVE.value == "risk_cooldown_active"
+
+
 def test_retryable_map_captcha_detected_false():
     """CAPTCHA_DETECTED should be retryable=false."""
     assert _RETRYABLE_MAP[ErrorCode.CAPTCHA_DETECTED] is False
@@ -47,6 +53,11 @@ def test_retryable_map_captcha_detected_false():
 def test_retryable_map_search_blocked_false():
     """SEARCH_BLOCKED should be retryable=false."""
     assert _RETRYABLE_MAP[ErrorCode.SEARCH_BLOCKED] is False
+
+
+def test_retryable_map_risk_cooldown_active_false():
+    """RISK_COOLDOWN_ACTIVE should be retryable=false."""
+    assert _RETRYABLE_MAP[ErrorCode.RISK_COOLDOWN_ACTIVE] is False
 
 
 def test_retryable_map_browser_crashed_false():

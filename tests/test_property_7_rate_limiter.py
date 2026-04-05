@@ -31,6 +31,7 @@ _NON_WHITELIST_TOOLS = [
 whitelist_tool_st = st.sampled_from(sorted(_WHITELIST_TOOLS))
 non_whitelist_tool_st = st.sampled_from(_NON_WHITELIST_TOOLS)
 platform_st = st.sampled_from(["xiaohongshu", "zhihu"])
+non_jitter_platform_st = st.just("zhihu")
 
 # Windows asyncio.sleep has ~15.6 ms granularity, so we use intervals large
 # enough that the tolerance stays a small fraction of the interval.
@@ -74,7 +75,7 @@ async def test_whitelisted_tool_skips_rate_limit(
 @given(
     tool_name=non_whitelist_tool_st,
     min_interval=min_interval_st,
-    platform=platform_st,
+    platform=non_jitter_platform_st,
 )
 @pytest.mark.asyncio
 async def test_non_whitelisted_tool_respects_min_interval(
