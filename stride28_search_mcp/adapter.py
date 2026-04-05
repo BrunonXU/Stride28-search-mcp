@@ -123,6 +123,10 @@ class XhsBrowserSearcher:
             logger.warning("MCP: 读取 Cookie 失败: %s", exc)
             return []
 
+        # 调试：打印所有 cookie 名称
+        all_names = sorted({c.get("name", "") for c in cookies if c.get("name")})
+        logger.info("MCP: 当前所有 cookie 名称: %s", all_names)
+
         return sorted(
             {
                 cookie.get("name", "")
@@ -209,6 +213,24 @@ class XhsBrowserSearcher:
             )
             self._last_auth_result = result
             return result
+
+        # 方法3: DOM 元素检测（参考 xpzouying/xiaohongshu-mcp）
+        # 只用精确的登录后才出现的 selector，不用宽泛的 avatar
+        try:
+            user_channel = await self._page.query_selector(
+                '.main-container .user .link-wrapper .channel'
+            )
+            if user_channel:
+                result = XhsAuthResult(
+                    logged_in=True,
+                    source="dom_user_channel",
+                    reason="login_element_found",
+                    login_cookie_names=login_cookie_names,
+                )
+                self._last_auth_result = result
+                return result
+        except Exception as e:
+            logger.warning("MCP: DOM 登录检测异常: %s", e)
 
         reason = selfinfo_state.get("reason", "").strip()
         if not reason:
