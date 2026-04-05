@@ -175,7 +175,7 @@ Work Buddy 示例（实验性）：
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `query` | string | 必填 | 搜索关键词 |
-| `limit` | int | 10 | 返回条数 |
+| `limit` | int | 10 | 返回条数；推荐 `10-20`，主要影响返回多少条，不会额外触发评论翻页 |
 | `note_type` | string | `"all"` | `"all"` / `"normal"` / `"video"` |
 
 ### get_note_detail
@@ -184,17 +184,60 @@ Work Buddy 示例（实验性）：
 |------|------|--------|------|
 | `note_id` | string | 必填 | 笔记 ID |
 | `xsec_token` | string | `""` | 安全 token |
-| `max_comments` | int | 10 | 最大评论数；默认只取较少评论，减少翻页强度 |
+| `max_comments` | int | 10 | 推荐 `10-20`；超过 `20` 属于更深评论抓取。服务端会将大于 `50` 的值按 `50` 处理，以控制单次详情请求强度 |
+
+### search_zhihu
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `query` | string | 必填 | 搜索关键词 |
+| `limit` | int | 10 | 推荐 `5-10`；主要影响返回多少条解析结果 |
 
 ### get_zhihu_question
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `question_id` | string | 必填 | 问题 ID |
-| `limit` | int | 5 | 回答数 |
-| `max_content_length` | int | 10000 | 最大字符数，`0` = 不截断 |
+| `limit` | int | 5 | 推荐 `3-5`；主要影响返回多少条回答 |
+| `max_content_length` | int | 10000 | 最大字符数，`0` = 不截断；这是输出长度控制，不是风控参数 |
 
 </details>
+
+## 推荐使用方式
+
+普通使用时，建议把这个 MCP 当成“低频、定向检索工具”，而不是批量采集器。
+
+- 小红书：先 `login_xiaohongshu`，再 `search_xiaohongshu`，最后只对少量目标笔记调用 `get_note_detail`
+- 知乎：先 `login_zhihu`，再 `search_zhihu`，只对少量目标问题调用 `get_zhihu_question`
+- 不建议让 agent 连续发起很多轮相似搜索，也不建议一上来就要求深翻很多评论
+- 如果返回 `captcha_detected`、`search_blocked` 或 `risk_cooldown_active`，就先停，不要继续重试
+
+## 参数建议
+
+下面这些建议值主要是为了让 MCP 的行为更克制、更可解释，不是因为搜索结果数本身会直接暴露“使用 AI”。
+
+- `search_xiaohongshu.limit`
+  - 默认 `10`
+  - 推荐 `10-20`
+  - 主要影响单页结果里返回多少条，不会像评论翻页那样明显增加交互强度
+
+- `get_note_detail.max_comments`
+  - 默认 `10`
+  - 推荐 `10-20`
+  - `20-50` 视为更深评论抓取
+  - 服务端硬上限 `50`
+
+- `search_zhihu.limit`
+  - 默认 `10`
+  - 推荐 `5-10`
+
+- `get_zhihu_question.limit`
+  - 默认 `5`
+  - 推荐 `3-5`
+
+- `get_zhihu_question.max_content_length`
+  - 默认 `10000`
+  - 用于控制输出长度和 token 成本，不属于风控核心参数
 
 <details>
 <summary><strong>错误码</strong></summary>

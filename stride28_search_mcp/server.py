@@ -367,6 +367,7 @@ async def search_xiaohongshu(query: str, limit: int = 10, note_type: str = "all"
 )
 async def get_note_detail(note_id: str, xsec_token: str = "", max_comments: int = 10) -> str:
     platform, tool_name = "xiaohongshu", "get_note_detail"
+    max_comments = min(max_comments, 50)  # 评论翻页会增加风控风险，硬上限 50
     cooldown_error = _active_cooldown_envelope(platform, tool_name)
     if cooldown_error:
         return cooldown_error
